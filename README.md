@@ -24,3 +24,31 @@ agent --help
 ```
 
 `mise run install` does an editable install via `pyproject.toml`, so edits to source take effect immediately without reinstalling.
+
+## Usage
+
+### Bootstrap a project
+
+```sh
+agent bootstrap <project-dir> --lang go|typescript|python
+```
+
+Creates in `<project-dir>`:
+
+- `AGENTS.md` — conventions, stack, and gotchas for agents working in that project
+- `memory/status.md` — session-to-session work log
+- `sensors/` — placeholder directory for lint, test, and LSP check scripts
+- `.claude/settings.json` — allow/deny list for unattended commands
+- `.claude/hooks/block-destructive.sh` — PreToolUse hook that blocks `rm -rf`, `git push --force`, `sudo`, and similar even when `--dangerously-skip-permissions` is set
+
+### Run the loop
+
+```sh
+agent loop "add a /health endpoint"
+```
+
+Three steps:
+
+1. **Planner** — a read-only sub-agent explores the codebase and writes `plan.md`
+2. **Approval gate** — you review the plan and respond `y` (approve), `n` (reject), or `f` (give feedback). Feedback amends `plan.md` and the gate loops back for a final decision before any code is written.
+3. **Worker** — implements the plan one task at a time inside a disposable git worktree; stops and surfaces the error if any task fails

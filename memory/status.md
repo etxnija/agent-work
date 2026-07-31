@@ -88,3 +88,11 @@ Session-to-session progress log. Distinct from AGENTS.md (which holds stable rul
 ## Session end: 2026-07-30
 
 Phase 1 complete. Trial run on ev-decide passed. Next session: Phase 2 (sensors).
+
+## 2026-07-31 — README task 1: Why section
+
+### Done
+- Created README.md with motivation paragraph (problem + feedforward/sensor/flywheel solution) and architecture diagram matching AGENTS.md.
+- Added ## Installation section to README.md: prereqs, three-command code block (clone, mise run install, agent --help), and editable-install note.
+- Added ## Usage section to README.md: bootstrap subsection (command + what it creates) and loop subsection (command + three-step plan/approve/implement flow with y/n/f options).
+- Added ## Further reading section to README.md with links to docs/roadmap.md and docs/arch/adr/, each with a one-line description.

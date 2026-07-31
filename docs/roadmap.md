@@ -85,7 +85,8 @@ Goal: the loop learns across sessions and recovers from known failure modes with
 | Work log (memory/status.md) written by worker after each run | ✅ (basic — from Phase 1) |
 | External memory (AGENTS.md updated by worker with discovered patterns) | pending |
 | Error recovery templates for recurring failure modes | pending |
-| Git commit after successful loop run | pending |
+| Per-task git commit in worktree branch | ✅ |
+| Interactive merge prompt after successful run (y/n fast-forward into main) | ✅ |
 | PR creation for review | pending |
 
 ---

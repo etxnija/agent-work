@@ -13,6 +13,7 @@ Environment:
 
 import hashlib
 import re
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -76,6 +77,89 @@ def _task_title(task_text: str) -> str:
     """First line of a task with leading 'N. ' stripped, truncated for display."""
     first_line = task_text.split('\n')[0].strip()
     return re.sub(r'^\d+\.\s+', '', first_line)[:80]
+
+
+# ── Git helpers ──────────────────────────────────────────────────────────────
+
+def _commit_task(task_num: int, title: str, worktree: Path) -> None:
+    """
+    Stage all changes in the worktree and commit them with a task-scoped message.
+    Called after each worker task succeeds (Phase 3 commit hook).
+    Skips silently if there is nothing to commit (e.g. worker only updated
+    status.md, which is written to the project root via absolute path).
+    """
+    add = subprocess.run(["git", "add", "-A"], cwd=worktree, capture_output=True)
+    if add.returncode != 0:
+        return
+
+    commit = subprocess.run(
+        ["git", "commit", "-m", f"Task {task_num}: {title}"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+    )
+    if commit.returncode == 0:
+        sha = commit.stdout.strip().splitlines()[0] if commit.stdout else ""
+        print(f"[commit] Task {task_num} committed ({sha}).")
+    elif "nothing to commit" in (commit.stdout + commit.stderr):
+        print(f"[commit] Task {task_num}: nothing new to commit in worktree.")
+    else:
+        print(f"[commit] Warning: commit failed — {commit.stderr.strip()}")
+
+
+# ── Merge helper ─────────────────────────────────────────────────────────────
+
+def _branch_commits(branch: str, project_root: Path) -> list[str]:
+    """Return one-line summaries of commits on branch that are not on HEAD."""
+    result = subprocess.run(
+        ["git", "log", f"HEAD..{branch}", "--oneline"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+    )
+    return [l for l in result.stdout.splitlines() if l.strip()]
+
+
+def _offer_merge(branch: str, project_root: Path) -> None:
+    """
+    Show commits on branch and interactively offer to fast-forward merge into HEAD.
+    Called after a successful loop run when the sandbox preserved a branch.
+    """
+    commits = _branch_commits(branch, project_root)
+
+    if not commits:
+        print(f"\n[merge] Branch '{branch}' has no commits ahead of HEAD.")
+        print(f"[merge] The worker may not have committed. Branch preserved for manual inspection.")
+        print(f"[merge]   git log HEAD..{branch}")
+        return
+
+    print(f"\n[merge] Branch '{branch}' — {len(commits)} commit(s) ready to merge:")
+    for c in commits:
+        print(f"  {c}")
+
+    answer = input("\n[merge] Merge into current branch? (y/n) ").strip().lower()
+    if answer != "y":
+        print(f"[merge] Branch '{branch}' preserved. To merge manually:")
+        print(f"  git merge --ff-only {branch} && git branch -D {branch}")
+        return
+
+    merge = subprocess.run(
+        ["git", "merge", "--ff-only", branch],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+    )
+    if merge.returncode == 0:
+        subprocess.run(
+            ["git", "branch", "-D", branch],
+            cwd=project_root,
+            capture_output=True,
+        )
+        print(f"[merge] Done. Branch '{branch}' merged and deleted.")
+    else:
+        print(f"[merge] Fast-forward failed (HEAD may have moved): {merge.stderr.strip()}")
+        print(f"[merge] Branch '{branch}' preserved. Merge manually:")
+        print(f"  git merge {branch} && git branch -D {branch}")
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -169,9 +253,12 @@ def run_loop(task: str) -> int:
                 print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
 
             # Phase 2: run sensors here (lint, test, coverage)
-            # Phase 3: git commit per task here
+            _commit_task(i, _task_title(task_text), handle.path)
 
-        handle.keep()  # all tasks complete → preserve the branch for Phase 3 merge
+        handle.keep()  # all tasks complete → preserve the branch for merge
+
+    if handle.branch:  # "" when NoopSandbox is active (tests / no-git projects)
+        _offer_merge(handle.branch, project_root)
 
     print(f"\n[loop] All {len(tasks)} tasks complete.")
     return 0

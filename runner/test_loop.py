@@ -1,11 +1,21 @@
 """Tests for runner/loop.py."""
 
+import os
+import subprocess
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from runner.drivers.base import AgentResult
-from runner.loop import PLAN_READY_SIGNAL, _parse_tasks, _task_title, run_loop
+from runner.loop import (
+    PLAN_READY_SIGNAL,
+    _branch_commits,
+    _commit_task,
+    _offer_merge,
+    _parse_tasks,
+    _task_title,
+    run_loop,
+)
 from runner.sandbox.noop import NoopSandbox
 
 
@@ -394,3 +404,133 @@ class TestRunLoopPlanReadySignalWarning:
         out = capsys.readouterr().out
         assert "warning" in out.lower()
         assert code == 0
+
+
+# ── _branch_commits / _offer_merge ────────────────────────────────────────────
+
+def _init_repo(path: Path) -> None:
+    env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+           "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "init"],
+                   cwd=path, check=True, capture_output=True, env=env)
+
+
+def _make_branch_with_commit(repo: Path, branch: str, message: str) -> None:
+    env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+           "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+    subprocess.run(["git", "checkout", "-b", branch], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", message],
+                   cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "checkout", "-"], cwd=repo, check=True, capture_output=True)
+
+
+class TestCommitTask:
+    def _init_repo(self, path: Path) -> None:
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "init"],
+                       cwd=path, check=True, capture_output=True, env=env)
+
+    def test_commits_new_file(self, tmp_path, capsys):
+        self._init_repo(tmp_path)
+        (tmp_path / "new.txt").write_text("hello")
+        _commit_task(1, "Add greeting", tmp_path)
+        log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
+                             capture_output=True, text=True).stdout
+        assert "Task 1: Add greeting" in log
+        assert "committed" in capsys.readouterr().out.lower()
+
+    def test_nothing_to_commit_skips_silently(self, tmp_path, capsys):
+        self._init_repo(tmp_path)
+        _commit_task(1, "No changes", tmp_path)
+        out = capsys.readouterr().out
+        assert "nothing" in out.lower()
+        # still only the init commit
+        log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
+                             capture_output=True, text=True).stdout
+        assert log.strip().count("\n") == 0  # single commit
+
+
+class TestBranchCommits:
+    def test_returns_commits_ahead_of_head(self, tmp_path):
+        _init_repo(tmp_path)
+        _make_branch_with_commit(tmp_path, "agent/test", "add feature")
+        commits = _branch_commits("agent/test", tmp_path)
+        assert len(commits) == 1
+        assert "add feature" in commits[0]
+
+    def test_returns_empty_when_no_commits_ahead(self, tmp_path):
+        _init_repo(tmp_path)
+        subprocess.run(["git", "checkout", "-b", "agent/empty"],
+                       cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True)
+        assert _branch_commits("agent/empty", tmp_path) == []
+
+
+class TestOfferMerge:
+    def test_no_commits_prints_warning_and_returns(self, tmp_path, capsys):
+        _init_repo(tmp_path)
+        subprocess.run(["git", "checkout", "-b", "agent/empty"],
+                       cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True)
+
+        _offer_merge("agent/empty", tmp_path)
+        out = capsys.readouterr().out
+        assert "no commits" in out.lower()
+
+    def test_merge_y_fast_forwards_and_deletes_branch(self, tmp_path, capsys):
+        _init_repo(tmp_path)
+        _make_branch_with_commit(tmp_path, "agent/feat", "add readme")
+
+        with patch("builtins.input", return_value="y"):
+            _offer_merge("agent/feat", tmp_path)
+
+        out = capsys.readouterr().out
+        assert "merged" in out.lower()
+        # branch should be deleted
+        branches = subprocess.run(["git", "branch"], cwd=tmp_path,
+                                  capture_output=True, text=True).stdout
+        assert "agent/feat" not in branches
+
+    def test_merge_n_preserves_branch_and_prints_instructions(self, tmp_path, capsys):
+        _init_repo(tmp_path)
+        _make_branch_with_commit(tmp_path, "agent/feat", "add feature")
+
+        with patch("builtins.input", return_value="n"):
+            _offer_merge("agent/feat", tmp_path)
+
+        out = capsys.readouterr().out
+        assert "agent/feat" in out  # instructions mention the branch name
+        branches = subprocess.run(["git", "branch"], cwd=tmp_path,
+                                  capture_output=True, text=True).stdout
+        assert "agent/feat" in branches
+        # cleanup
+        subprocess.run(["git", "branch", "-D", "agent/feat"], cwd=tmp_path, capture_output=True)
+
+    def test_noop_sandbox_skips_merge_offer(self, tmp_path, monkeypatch, capsys):
+        """NoopSandbox yields branch=''; run_loop must not call _offer_merge."""
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+
+        def worker_side_effect(prompt, context_files, cwd=None):
+            status = tmp_path / "memory" / "status.md"
+            status.write_text(status.read_text() + "- done\n")
+            return _ok()
+
+        driver.run.side_effect = worker_side_effect
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._offer_merge") as mock_merge:
+            run_loop("task")
+
+        mock_merge.assert_not_called()

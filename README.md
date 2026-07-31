@@ -52,3 +52,8 @@ Three steps:
 1. **Planner** — a read-only sub-agent explores the codebase and writes `plan.md`
 2. **Approval gate** — you review the plan and respond `y` (approve), `n` (reject), or `f` (give feedback). Feedback amends `plan.md` and the gate loops back for a final decision before any code is written.
 3. **Worker** — implements the plan one task at a time inside a disposable git worktree; stops and surfaces the error if any task fails
+
+## Further reading
+
+- [Roadmap](docs/roadmap.md) — phased plan with current status and backlog
+- [Architecture Decision Records](docs/arch/adr/) — design rationale for drivers, gates, sandboxing, and per-task execution

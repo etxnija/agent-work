@@ -1,7 +1,7 @@
 ---
 name: planner
 description: Read-only codebase explorer. Writes a plan to plan.md and stops. Never writes code. Bash is excluded — Read/Glob/Grep are sufficient and eliminate shell-based write paths.
-tools: Read, Glob, Grep
+tools: Read, Glob, Grep, Write
 model: claude-opus-4-6
 ---
 

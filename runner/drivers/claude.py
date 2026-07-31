@@ -119,7 +119,16 @@ class ClaudeDriver(AgentDriver):
         full_prompt = f"{body}\n\n---\n\n{prompt}"
 
         if tools:
-            cmd = ["claude", "--print", "--allowedTools", ",".join(tools), full_prompt]
+            # --allowedTools restricts which tools are available (security boundary).
+            # --dangerously-skip-permissions suppresses approval prompts for those tools
+            # (required for unattended operation — without it, Write/Edit would hang waiting
+            # for a human to confirm). Together: "only these tools, all auto-approved."
+            cmd = [
+                "claude", "--print",
+                "--allowedTools", ",".join(tools),
+                "--dangerously-skip-permissions",
+                full_prompt,
+            ]
         else:
             cmd = ["claude", "--print", "--dangerously-skip-permissions", full_prompt]
 

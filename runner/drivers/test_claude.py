@@ -219,7 +219,7 @@ class TestClaudeDriverRunSubagent:
         agent_dir = tmp_path / "agents"
         agent_dir.mkdir()
         (agent_dir / "planner.md").write_text(
-            "---\nname: planner\ntools: Read, Glob, Grep\n---\nYou are the planner."
+            "---\nname: planner\ntools: Read, Glob, Grep, Write\n---\nYou are the planner."
         )
 
         import runner.drivers.claude as mod
@@ -231,8 +231,10 @@ class TestClaudeDriverRunSubagent:
 
         cmd = mock_run.call_args[0][0]
         assert "--allowedTools" in cmd
-        assert "Read,Glob,Grep" in cmd
-        assert "--dangerously-skip-permissions" not in cmd
+        assert "Read,Glob,Grep,Write" in cmd
+        # Both flags required: --allowedTools restricts tool set, --dangerously-skip-permissions
+        # suppresses prompts so unattended Write calls don't hang the loop.
+        assert "--dangerously-skip-permissions" in cmd
         assert "You are the planner." in cmd[-1]
         assert "explore" in cmd[-1]
         assert result.text == "plan written"

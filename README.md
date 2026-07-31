@@ -11,3 +11,16 @@ sensors/          Shell scripts: lint, test, LSP checks (no model dependency)
 bootstrap/        Sets up a new project with harness structure
 memory/           AGENTS.md (this file) + status.md (work log)
 ```
+
+## Installation
+
+Prerequisites: Python 3.12, [mise](https://mise.jdx.dev).
+
+```sh
+git clone <repo-url> ~/source/agent-work
+cd ~/source/agent-work
+mise run install
+agent --help
+```
+
+`mise run install` does an editable install via `pyproject.toml`, so edits to source take effect immediately without reinstalling.

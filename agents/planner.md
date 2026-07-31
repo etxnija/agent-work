@@ -31,8 +31,21 @@ Write plan.md with this structure:
 ## Context
 What you found in the codebase that's relevant to this task.
 
-## Approach
-Step-by-step what needs to be done, in order. Be specific about files and functions.
+## Tasks
+
+A numbered list of small, independent tasks. Apply the INVEST principle: each task
+must touch a bounded set of files, address one concern, and be independently
+testable and committable. If a task doesn't fit that description, split it further.
+
+Format each task exactly like this — the loop parses this structure:
+
+1. **<title>** — <one-line description>
+   Files: <file1>, <file2>
+   What: <specific implementation detail — what to add/change/remove and where>
+
+2. **<title>** — <one-line description>
+   Files: <file>
+   What: <specific implementation detail>
 
 ## Assumptions
 Anything you assumed because it wasn't clear from the codebase.
@@ -43,5 +56,8 @@ Anything that could go wrong or needs human judgment.
 ## Out of scope
 What you are explicitly NOT doing.
 ```
+
+Keep splitting any task that touches more than two or three files or addresses more
+than one concern. A plan with ten small tasks is better than one with three large ones.
 
 Once plan.md is written, output exactly: `PLAN READY — awaiting approval.` and stop.

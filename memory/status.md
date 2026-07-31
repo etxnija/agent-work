@@ -49,6 +49,18 @@ Session-to-session progress log. Distinct from AGENTS.md (which holds stable rul
 - Roadmap: sandboxing rows added, Phase 4 blocking dependencies made explicit
 - Backlink from roadmap.md to Obsidian PRD added
 
+## 2026-07-31 — Phase 1.2: per-task implementation
+
+### Done
+- Planner ## Approach replaced with ## Tasks: INVEST-sized numbered list with title, Files, What
+- _parse_tasks() extracts numbered task list from plan.md's ## Tasks section
+- _task_title() helper for display
+- Loop now implements one task at a time; stops and surfaces on failure at task N
+- Per-task status.md hash check (one warning per task, not one per loop run)
+- Phase 2 sensor hook point and Phase 3 commit hook point stubbed per task
+- ADR-0008 written; roadmap updated with Phase 1.2 between Phase 1 and Phase 2
+- 43 tests passing (up from 32): added _parse_tasks, _task_title, per-task execution, mid-task failure, per-task status check
+
 ## Session end: 2026-07-30
 
 Phase 1 complete. Trial run on ev-decide passed. Next session: Phase 2 (sensors).

@@ -28,6 +28,21 @@ Trial run: ev-decide (TypeScript). Planner explored a real codebase; worker adde
 
 ---
 
+## Phase 1.2 — Per-task implementation ✅
+
+Goal: plan size, diff size, and PR size are all bounded. Prerequisite for Phase 2 sensor feedback to be locally actionable and for Phase 3/4 commits and PRs to be reviewably sized. See ADR-0008.
+
+| Item | Status |
+|---|---|
+| Planner `## Tasks` format: numbered INVEST-sized tasks replacing `## Approach` narrative | ✅ |
+| `_parse_tasks()` extracts task list from plan.md after approval | ✅ |
+| Loop implements one task at a time; stops and surfaces on failure | ✅ |
+| Per-task status.md entry and hash check | ✅ |
+| Phase 2 sensor hook point per task (stub, wired in Phase 2) | ✅ |
+| Phase 3 git commit hook point per task (stub, wired in Phase 3) | ✅ |
+
+---
+
 ## Phase 2 — Computational sensors
 
 Goal: the loop gets deterministic feedback on what the worker produces. The worker self-corrects before the human sees the output.

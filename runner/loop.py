@@ -1,5 +1,5 @@
 """
-loop.py — Phase 1 harness loop: plan → approve → implement
+loop.py — Phase 1 harness loop: plan → approve → implement (per task)
 
 Usage (via CLI after pip install -e):
     agent loop "add a /health endpoint"
@@ -11,6 +11,7 @@ Environment:
 """
 
 import hashlib
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -26,6 +27,8 @@ PLANNER_AGENT = "planner"
 PLAN_READY_SIGNAL = "PLAN READY"
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def _file_hash(path: str) -> str | None:
     """MD5 of a file's contents, or None if the file doesn't exist."""
     p = Path(path)
@@ -33,15 +36,51 @@ def _file_hash(path: str) -> str | None:
 
 
 def _append_status(entry: str) -> None:
-    """Append a timestamped entry to status.md if it exists."""
+    """Append an entry to status.md if it exists."""
     p = Path(STATUS_MD)
     if p.exists():
         p.write_text(p.read_text() + "\n" + entry)
 
 
+def _parse_tasks(plan_path: str) -> list[str]:
+    """
+    Extract the numbered task list from plan.md's ## Tasks section.
+
+    Each task is everything from 'N. ' up to (but not including) the next
+    numbered item or the next ## heading. Returns an empty list if no Tasks
+    section or no numbered items are found.
+    """
+    content = Path(plan_path).read_text()
+
+    section_match = re.search(
+        r'^## Tasks\s*\n(.*?)(?=^##|\Z)', content, re.MULTILINE | re.DOTALL
+    )
+    if not section_match:
+        return []
+
+    section = section_match.group(1)
+    positions = [m.start() for m in re.finditer(r'^\d+\.\s+', section, re.MULTILINE)]
+    if not positions:
+        return []
+
+    tasks = []
+    for i, pos in enumerate(positions):
+        end = positions[i + 1] if i + 1 < len(positions) else len(section)
+        tasks.append(section[pos:end].strip())
+    return tasks
+
+
+def _task_title(task_text: str) -> str:
+    """First line of a task with leading 'N. ' stripped, truncated for display."""
+    first_line = task_text.split('\n')[0].strip()
+    return re.sub(r'^\d+\.\s+', '', first_line)[:80]
+
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+
 def run_loop(task: str) -> int:
     """
-    Execute one plan → approve → implement cycle.
+    Execute one plan → approve → implement cycle, implementing one task at a time.
     Returns exit code (0 = success, 1 = error, 2 = rejected by human).
     """
     driver = get_driver()
@@ -51,11 +90,10 @@ def run_loop(task: str) -> int:
     print(f"\n[planner] Task: {task!r}")
     print("[planner] Exploring codebase…")
 
-    planner_prompt = (
-        f"Task: {task}\n\n"
-        "Explore the codebase and write a plan to plan.md following your instructions."
+    plan_result = driver.run_subagent(
+        PLANNER_AGENT,
+        f"Task: {task}\n\nExplore the codebase and write a plan to plan.md following your instructions.",
     )
-    plan_result = driver.run_subagent(PLANNER_AGENT, planner_prompt)
 
     if plan_result.exit_code != 0:
         print(f"[error] Planner exited with code {plan_result.exit_code}:\n{plan_result.text}")
@@ -67,8 +105,6 @@ def run_loop(task: str) -> int:
         return 1
 
     if PLAN_READY_SIGNAL not in plan_result.text:
-        # Plan file exists but the signal is missing — surface the output and
-        # continue; the human can decide whether the plan is usable.
         print(f"[warning] Planner output did not contain '{PLAN_READY_SIGNAL}'.")
         print(f"[warning] Planner output:\n{plan_result.text}\n")
 
@@ -83,29 +119,48 @@ def run_loop(task: str) -> int:
         )
         return 2
 
-    # ── 3. Implement ─────────────────────────────────────────────────────────
-    print("\n[worker] Implementing approved plan…")
-    status_hash_before = _file_hash(STATUS_MD)
-
-    worker_prompt = (
-        f"Implement the plan in {PLAN_FILE} exactly as described.\n"
-        f"Follow all conventions in {AGENTS_MD}.\n"
-        f"After completing, append a brief summary of what you did to {STATUS_MD} "
-        f"under today's date ({date.today().isoformat()})."
-    )
-    worker_result = driver.run(
-        worker_prompt,
-        context_files=[PLAN_FILE, AGENTS_MD, STATUS_MD],
-    )
-
-    if worker_result.exit_code != 0:
-        print(f"[error] Worker exited with code {worker_result.exit_code}:\n{worker_result.text}")
+    # ── 3. Parse tasks ────────────────────────────────────────────────────────
+    tasks = _parse_tasks(PLAN_FILE)
+    if not tasks:
+        print(
+            f"[error] No numbered tasks found in {PLAN_FILE}. "
+            "The plan must have a '## Tasks' section with items like '1. **title** — …'"
+        )
         return 1
 
-    if _file_hash(STATUS_MD) == status_hash_before:
-        print(f"[warning] Worker did not update {STATUS_MD} — work log may be incomplete.")
+    print(f"\n[loop] {len(tasks)} task(s) to implement.")
 
-    print("\n[loop] Done.")
+    # ── 4. Implement task by task ─────────────────────────────────────────────
+    for i, task_text in enumerate(tasks, 1):
+        print(f"\n[worker] Task {i}/{len(tasks)}: {_task_title(task_text)}")
+
+        status_hash_before = _file_hash(STATUS_MD)
+
+        worker_prompt = (
+            f"Implement this specific task from the approved plan in {PLAN_FILE}:\n\n"
+            f"{task_text}\n\n"
+            f"Implement only this task — do not work ahead to other tasks.\n"
+            f"Follow all conventions in {AGENTS_MD}.\n"
+            f"After completing, append a one-line summary of what you did to {STATUS_MD} "
+            f"under today's date ({date.today().isoformat()})."
+        )
+        worker_result = driver.run(
+            worker_prompt,
+            context_files=[PLAN_FILE, AGENTS_MD, STATUS_MD],
+        )
+
+        if worker_result.exit_code != 0:
+            print(f"[error] Worker failed on task {i}/{len(tasks)}:\n{worker_result.text}")
+            print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
+            return 1
+
+        if _file_hash(STATUS_MD) == status_hash_before:
+            print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
+
+        # Phase 2: run sensors here (lint, test, coverage)
+        # Phase 3: git commit per task here
+
+    print(f"\n[loop] All {len(tasks)} tasks complete.")
     return 0
 
 

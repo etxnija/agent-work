@@ -96,3 +96,7 @@ Phase 1 complete. Trial run on ev-decide passed. Next session: Phase 2 (sensors)
 - Added ## Installation section to README.md: prereqs, three-command code block (clone, mise run install, agent --help), and editable-install note.
 - Added ## Usage section to README.md: bootstrap subsection (command + what it creates) and loop subsection (command + three-step plan/approve/implement flow with y/n/f options).
 - Added ## Further reading section to README.md with links to docs/roadmap.md and docs/arch/adr/, each with a one-line description.
+- Created README.md with Why section (3-sentence motivation: problem + feedforward/sandboxing/flywheel solution) and architecture diagram from AGENTS.md.
+- Added ## Installation section to README.md: Python 3.12 + mise prereqs, three-step code block (clone, mise run install, agent --help), editable-install note.
+- Added ## Usage section to README.md: bootstrap subsection (command + what it creates) and loop subsection (three-step plan/approve/implement flow with y/n/f feedback option).
+- Added ## Further reading section to README.md with bullet links to docs/roadmap.md and docs/arch/adr/ with one-line descriptions.

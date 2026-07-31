@@ -120,10 +120,13 @@ def _branch_commits(branch: str, project_root: Path) -> list[str]:
     return [l for l in result.stdout.splitlines() if l.strip()]
 
 
-def _offer_merge(branch: str, project_root: Path) -> None:
+def _offer_merge(branch: str, project_root: Path, task: str = "") -> None:
     """
-    Show commits on branch and interactively offer to fast-forward merge into HEAD.
-    Called after a successful loop run when the sandbox preserved a branch.
+    Show commits on branch and offer a squash-merge into HEAD.
+
+    Squash merge: all task commits on the branch are collapsed into one commit
+    on main, keeping the main history linear. The branch retains its per-task
+    commits for traceability until it is deleted.
     """
     commits = _branch_commits(branch, project_root)
 
@@ -133,33 +136,44 @@ def _offer_merge(branch: str, project_root: Path) -> None:
         print(f"[merge]   git log HEAD..{branch}")
         return
 
-    print(f"\n[merge] Branch '{branch}' — {len(commits)} commit(s) ready to merge:")
+    print(f"\n[merge] Branch '{branch}' — {len(commits)} commit(s) to squash into main:")
     for c in commits:
         print(f"  {c}")
 
-    answer = input("\n[merge] Merge into current branch? (y/n) ").strip().lower()
+    answer = input("\n[merge] Squash-merge into current branch? (y/n) ").strip().lower()
     if answer != "y":
-        print(f"[merge] Branch '{branch}' preserved. To merge manually:")
-        print(f"  git merge --ff-only {branch} && git branch -D {branch}")
+        print(f"[merge] Branch '{branch}' preserved. To squash-merge manually:")
+        print(f"  git merge --squash {branch} && git commit && git branch -D {branch}")
         return
 
-    merge = subprocess.run(
-        ["git", "merge", "--ff-only", branch],
+    squash = subprocess.run(
+        ["git", "merge", "--squash", branch],
         cwd=project_root,
         capture_output=True,
         text=True,
     )
-    if merge.returncode == 0:
-        subprocess.run(
-            ["git", "branch", "-D", branch],
-            cwd=project_root,
-            capture_output=True,
-        )
-        print(f"[merge] Done. Branch '{branch}' merged and deleted.")
+    if squash.returncode != 0:
+        print(f"[merge] Squash failed: {squash.stderr.strip()}")
+        print(f"[merge] Branch '{branch}' preserved.")
+        return
+
+    # Build a single commit message: task as subject, per-task commits as body.
+    subject = task.strip() or branch
+    body = "\n".join(f"- {c}" for c in commits)
+    commit_msg = f"{subject}\n\n{body}"
+
+    commit = subprocess.run(
+        ["git", "commit", "-m", commit_msg],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+    )
+    if commit.returncode == 0:
+        subprocess.run(["git", "branch", "-D", branch], cwd=project_root, capture_output=True)
+        print(f"[merge] Done. Squashed into one commit; branch '{branch}' deleted.")
     else:
-        print(f"[merge] Fast-forward failed (HEAD may have moved): {merge.stderr.strip()}")
-        print(f"[merge] Branch '{branch}' preserved. Merge manually:")
-        print(f"  git merge {branch} && git branch -D {branch}")
+        print(f"[merge] Commit failed: {commit.stderr.strip()}")
+        print(f"[merge] Branch '{branch}' preserved.")
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -258,7 +272,7 @@ def run_loop(task: str) -> int:
         handle.keep()  # all tasks complete → preserve the branch for merge
 
     if handle.branch:  # "" when NoopSandbox is active (tests / no-git projects)
-        _offer_merge(handle.branch, project_root)
+        _offer_merge(handle.branch, project_root, task)
 
     print(f"\n[loop] All {len(tasks)} tasks complete.")
     return 0

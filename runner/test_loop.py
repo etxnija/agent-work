@@ -480,19 +480,39 @@ class TestOfferMerge:
         out = capsys.readouterr().out
         assert "no commits" in out.lower()
 
-    def test_merge_y_fast_forwards_and_deletes_branch(self, tmp_path, capsys):
+    def test_merge_y_squashes_into_one_commit_and_deletes_branch(self, tmp_path, capsys):
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
         _init_repo(tmp_path)
-        _make_branch_with_commit(tmp_path, "agent/feat", "add readme")
+        # two commits on the branch
+        subprocess.run(["git", "checkout", "-b", "agent/feat"],
+                       cwd=tmp_path, check=True, capture_output=True)
+        (tmp_path / "a.txt").write_text("a")
+        subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Task 1: add a"],
+                       cwd=tmp_path, check=True, capture_output=True, env=env)
+        (tmp_path / "b.txt").write_text("b")
+        subprocess.run(["git", "add", "b.txt"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Task 2: add b"],
+                       cwd=tmp_path, check=True, capture_output=True, env=env)
+        subprocess.run(["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True)
 
         with patch("builtins.input", return_value="y"):
-            _offer_merge("agent/feat", tmp_path)
+            _offer_merge("agent/feat", tmp_path, task="add a and b")
 
         out = capsys.readouterr().out
-        assert "merged" in out.lower()
-        # branch should be deleted
+        assert "squashed" in out.lower()
+
+        # branch deleted
         branches = subprocess.run(["git", "branch"], cwd=tmp_path,
                                   capture_output=True, text=True).stdout
         assert "agent/feat" not in branches
+
+        # main has exactly one new commit (not two)
+        log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
+                             capture_output=True, text=True).stdout.strip().splitlines()
+        assert len(log) == 2  # init + one squash commit
+        assert "add a and b" in log[0]  # subject is the task description
 
     def test_merge_n_preserves_branch_and_prints_instructions(self, tmp_path, capsys):
         _init_repo(tmp_path)
@@ -503,6 +523,7 @@ class TestOfferMerge:
 
         out = capsys.readouterr().out
         assert "agent/feat" in out  # instructions mention the branch name
+        assert "--squash" in out    # squash-merge instructions, not ff
         branches = subprocess.run(["git", "branch"], cwd=tmp_path,
                                   capture_output=True, text=True).stdout
         assert "agent/feat" in branches

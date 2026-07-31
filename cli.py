@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""
+agent — harness CLI
+
+    agent bootstrap <project-dir> [--lang go|typescript|python]
+    agent loop [task]
+
+Install once (editable — source stays in place, no reinstall on edits):
+    pip install -e /path/to/agent-work
+
+Then run from any bootstrapped project directory:
+    cd ~/projects/my-app
+    agent bootstrap . --lang go
+    agent loop "add a /health endpoint"
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+
+def cmd_bootstrap(args) -> int:
+    from bootstrap.bootstrap import bootstrap
+    bootstrap(Path(args.project_dir), args.lang)
+    return 0
+
+
+def cmd_loop(args) -> int:
+    from runner.loop import run_loop
+    task = args.task or input("Task: ").strip()
+    if not task:
+        print("[error] No task provided.")
+        return 1
+    return run_loop(task)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="agent",
+        description="Agent harness CLI",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    bp = sub.add_parser(
+        "bootstrap",
+        help="Set up a new project with the harness structure",
+    )
+    bp.add_argument("project_dir", help="Directory to bootstrap (created if absent)")
+    bp.add_argument(
+        "--lang",
+        choices=["go", "typescript", "python"],
+        default="",
+        help="Primary language — affects sensor stubs and AGENTS.md (optional)",
+    )
+
+    lp = sub.add_parser(
+        "loop",
+        help="Run one plan → approve → implement cycle",
+    )
+    lp.add_argument("task", nargs="?", help="Task description (prompted if omitted)")
+
+    args = parser.parse_args()
+
+    match args.command:
+        case "bootstrap":
+            sys.exit(cmd_bootstrap(args))
+        case "loop":
+            sys.exit(cmd_loop(args))
+
+
+if __name__ == "__main__":
+    main()

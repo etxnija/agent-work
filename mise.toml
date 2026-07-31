@@ -1,0 +1,14 @@
+[tools]
+python = "3.12"
+
+[tasks.install]
+description = "Install the agent harness CLI (editable — no reinstall needed on edits)"
+run = "python -m pip install -e .[dev]"
+
+[tasks.test]
+description = "Run the harness test suite"
+run = "python -m pytest"
+
+[tasks.bootstrap-project]
+description = "Bootstrap a new project — usage: mise run bootstrap-project <dir> [-- --lang go]"
+run = "agent bootstrap"

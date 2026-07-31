@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-harness"
+version = "0.1.0"
+description = "Personal agent development harness built on Claude Code"
+requires-python = ">=3.12"
+# No third-party dependencies — only stdlib + claude CLI on PATH
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+agent = "cli:main"
+
+[tool.setuptools]
+# cli.py lives at the repo root as a standalone module
+py-modules = ["cli"]
+
+[tool.setuptools.packages.find]
+# Discovers runner/ and bootstrap/ as packages
+where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["runner", "bootstrap"]

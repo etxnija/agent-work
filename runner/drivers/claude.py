@@ -1,3 +1,4 @@
+import re
 import subprocess
 from pathlib import Path
 
@@ -10,6 +11,24 @@ _AGENT_SEARCH_PATHS = [
 ]
 
 
+def _parse_frontmatter(content: str) -> tuple[dict[str, str], str]:
+    """
+    Split a markdown file into (frontmatter_fields, body).
+    Returns ({}, full_content) if there is no YAML frontmatter block.
+    """
+    if not content.startswith("---"):
+        return {}, content.strip()
+    parts = content.split("---", 2)
+    if len(parts) != 3:
+        return {}, content.strip()
+    fields: dict[str, str] = {}
+    for line in parts[1].splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            fields[key.strip()] = value.strip()
+    return fields, parts[2].strip()
+
+
 def _load_agent_body(name: str) -> str | None:
     """
     Find agents/<name>.md and return its body (below the YAML frontmatter).
@@ -18,12 +37,25 @@ def _load_agent_body(name: str) -> str | None:
     for base in _AGENT_SEARCH_PATHS:
         candidate = base / f"{name}.md"
         if candidate.exists():
-            content = candidate.read_text()
-            if content.startswith("---"):
-                parts = content.split("---", 2)
-                return parts[2].strip() if len(parts) == 3 else content.strip()
-            return content.strip()
+            _, body = _parse_frontmatter(candidate.read_text())
+            return body
     return None
+
+
+def _load_agent_definition(name: str) -> tuple[str | None, list[str]]:
+    """
+    Load an agent definition. Returns (body, tools_list).
+    tools_list comes from the 'tools:' frontmatter field (comma-separated).
+    Returns (None, []) if the agent is not found.
+    """
+    for base in _AGENT_SEARCH_PATHS:
+        candidate = base / f"{name}.md"
+        if candidate.exists():
+            fields, body = _parse_frontmatter(candidate.read_text())
+            tools_raw = fields.get("tools", "")
+            tools = [t.strip() for t in tools_raw.split(",") if t.strip()] if tools_raw else []
+            return body, tools
+    return None, []
 
 
 def _inject_context(prompt: str, context_files: list[str]) -> str:
@@ -49,36 +81,47 @@ class ClaudeDriver(AgentDriver):
     Future: swap for ClaudeSDKDriver (python-sdk) without touching the loop.
     """
 
-    def run(self, prompt: str, context_files: list[str] = []) -> AgentResult:
+    def run(
+        self,
+        prompt: str,
+        context_files: list[str] = [],
+        cwd: Path | None = None,
+    ) -> AgentResult:
         full_prompt = _inject_context(prompt, context_files)
         result = subprocess.run(
             ["claude", "--print", "--dangerously-skip-permissions", full_prompt],
             capture_output=True,
             text=True,
+            cwd=cwd,
         )
         return AgentResult(text=result.stdout.strip(), exit_code=result.returncode)
 
     def run_subagent(self, agent_name: str, prompt: str) -> AgentResult:
         """
-        Load the agent definition from agents/<name>.md, compose its system
-        prompt inline, and run via the Claude CLI.
+        Load the agent definition from agents/<name>.md, compose its system prompt inline,
+        and run via the Claude CLI.
 
-        Inline composition (rather than a --agent flag) keeps this portable:
-        the same pattern works for any CLI tool by changing the driver, not
-        the loop.
+        If the agent declares a 'tools:' list in its frontmatter, --allowedTools is used
+        instead of --dangerously-skip-permissions (tighter grant, no permission prompts).
+        Inline composition keeps this portable: changing the driver is all that's needed
+        to support a different tool.
         """
-        body = _load_agent_body(agent_name)
+        body, tools = _load_agent_definition(agent_name)
         if body is None:
             return AgentResult(
-                text=f"[error] Agent definition not found: '{agent_name}'. "
-                     f"Searched: {[str(p) for p in _AGENT_SEARCH_PATHS]}",
+                text=(
+                    f"[error] Agent definition not found: '{agent_name}'. "
+                    f"Searched: {[str(p) for p in _AGENT_SEARCH_PATHS]}"
+                ),
                 exit_code=1,
             )
 
         full_prompt = f"{body}\n\n---\n\n{prompt}"
-        result = subprocess.run(
-            ["claude", "--print", "--dangerously-skip-permissions", full_prompt],
-            capture_output=True,
-            text=True,
-        )
+
+        if tools:
+            cmd = ["claude", "--print", "--allowedTools", ",".join(tools), full_prompt]
+        else:
+            cmd = ["claude", "--print", "--dangerously-skip-permissions", full_prompt]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
         return AgentResult(text=result.stdout.strip(), exit_code=result.returncode)

@@ -2,10 +2,11 @@
 
 import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from runner.drivers.base import AgentResult
 from runner.loop import PLAN_READY_SIGNAL, _parse_tasks, _task_title, run_loop
+from runner.sandbox.noop import NoopSandbox
 
 
 def _make_project(tmp_path: Path) -> Path:
@@ -151,6 +152,7 @@ class TestRunLoopPlannerFailures:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("builtins.print"):
             code = run_loop("do something")
 
@@ -173,6 +175,7 @@ class TestRunLoopNoTasks:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("builtins.print"):
             code = run_loop("task")
 
@@ -195,6 +198,7 @@ class TestRunLoopGateRejection:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("builtins.print"):
             code = run_loop("task")
 
@@ -216,7 +220,7 @@ class TestRunLoopPerTask:
         driver = MagicMock()
         driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
 
-        def worker_side_effect(prompt, context_files):
+        def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
             status.write_text(status.read_text() + f"- done\n")
             return _ok()
@@ -227,6 +231,7 @@ class TestRunLoopPerTask:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("builtins.print"):
             code = run_loop("task")
 
@@ -239,7 +244,7 @@ class TestRunLoopPerTask:
         driver = MagicMock()
         driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
 
-        def worker_side_effect(prompt, context_files):
+        def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
             status.write_text(status.read_text() + "- done\n")
             return _ok()
@@ -250,6 +255,7 @@ class TestRunLoopPerTask:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("builtins.print"):
             run_loop("task")
 
@@ -260,6 +266,31 @@ class TestRunLoopPerTask:
         # Each call is scoped to its task
         assert "Add tests" not in first_prompt
         assert "Add config" not in second_prompt
+
+    def test_worker_receives_sandbox_cwd(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+
+        def worker_side_effect(prompt, context_files, cwd=None):
+            status = tmp_path / "memory" / "status.md"
+            status.write_text(status.read_text() + "- done\n")
+            return _ok()
+
+        driver.run.side_effect = worker_side_effect
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("builtins.print"):
+            run_loop("task")
+
+        # NoopSandbox yields project_root as the workspace path
+        for call in driver.run.call_args_list:
+            assert call[1]["cwd"] == tmp_path.resolve()
 
     def test_stops_on_first_task_failure(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
@@ -273,6 +304,7 @@ class TestRunLoopPerTask:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("builtins.print"):
             code = run_loop("task")
 
@@ -287,7 +319,7 @@ class TestRunLoopPerTask:
 
         call_count = 0
 
-        def worker_side_effect(prompt, context_files):
+        def worker_side_effect(prompt, context_files, cwd=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -302,6 +334,7 @@ class TestRunLoopPerTask:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("builtins.print"):
             code = run_loop("task")
 
@@ -325,7 +358,8 @@ class TestRunLoopStatusCheckPerTask:
         gate.request.return_value = True
 
         with patch("runner.loop.get_driver", return_value=driver), \
-             patch("runner.loop.get_gate", return_value=gate):
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             run_loop("task")
 
         out = capsys.readouterr().out
@@ -343,7 +377,7 @@ class TestRunLoopPlanReadySignalWarning:
         driver = MagicMock()
         driver.run_subagent.return_value = _ok("no signal here")
 
-        def worker_side_effect(prompt, context_files):
+        def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
             status.write_text(status.read_text() + "- done\n")
             return _ok()
@@ -353,7 +387,8 @@ class TestRunLoopPlanReadySignalWarning:
         gate.request.return_value = True
 
         with patch("runner.loop.get_driver", return_value=driver), \
-             patch("runner.loop.get_gate", return_value=gate):
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("task")
 
         out = capsys.readouterr().out

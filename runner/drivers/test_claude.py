@@ -6,7 +6,44 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from runner.drivers.claude import ClaudeDriver, _inject_context, _load_agent_body
+from runner.drivers.claude import (
+    ClaudeDriver,
+    _inject_context,
+    _load_agent_body,
+    _load_agent_definition,
+    _parse_frontmatter,
+)
+
+
+# ── _parse_frontmatter ────────────────────────────────────────────────────────
+
+class TestParseFrontmatter:
+    CASES = [
+        pytest.param(
+            "---\nname: test\ntools: Read, Glob\n---\nBody here",
+            {"name": "test", "tools": "Read, Glob"},
+            "Body here",
+            id="parses_name_and_tools",
+        ),
+        pytest.param(
+            "No frontmatter",
+            {},
+            "No frontmatter",
+            id="no_frontmatter_returns_empty_dict",
+        ),
+        pytest.param(
+            "---\nname: test\n---\n\n  Stripped body  \n",
+            {"name": "test"},
+            "Stripped body",
+            id="body_is_stripped",
+        ),
+    ]
+
+    @pytest.mark.parametrize("content,expected_fields,expected_body", CASES)
+    def test_parse(self, content, expected_fields, expected_body):
+        fields, body = _parse_frontmatter(content)
+        assert fields == expected_fields
+        assert body == expected_body
 
 
 # ── _load_agent_body ──────────────────────────────────────────────────────────
@@ -48,6 +85,44 @@ class TestLoadAgentBody:
         assert _load_agent_body("nonexistent") is None
 
 
+# ── _load_agent_definition ────────────────────────────────────────────────────
+
+class TestLoadAgentDefinition:
+    def test_returns_body_and_tools(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "planner.md").write_text(
+            "---\nname: planner\ntools: Read, Glob, Grep\n---\nYou plan."
+        )
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        body, tools = _load_agent_definition("planner")
+        assert body == "You plan."
+        assert tools == ["Read", "Glob", "Grep"]
+
+    def test_no_tools_field_returns_empty_list(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "worker.md").write_text("---\nname: worker\n---\nYou work.")
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        body, tools = _load_agent_definition("worker")
+        assert body == "You work."
+        assert tools == []
+
+    def test_not_found_returns_none_and_empty(self, tmp_path, monkeypatch):
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [tmp_path / "agents"])
+
+        body, tools = _load_agent_definition("missing")
+        assert body is None
+        assert tools == []
+
+
 # ── _inject_context ───────────────────────────────────────────────────────────
 
 class TestInjectContext:
@@ -85,6 +160,7 @@ class TestClaudeDriverRun:
         pytest.param(
             "hello",
             [],
+            None,
             ["claude", "--print", "--dangerously-skip-permissions", "hello"],
             "response text",
             0,
@@ -93,6 +169,7 @@ class TestClaudeDriverRun:
         pytest.param(
             "do something",
             [],
+            None,
             ["claude", "--print", "--dangerously-skip-permissions", "do something"],
             "",
             1,
@@ -100,17 +177,17 @@ class TestClaudeDriverRun:
         ),
     ]
 
-    @pytest.mark.parametrize("prompt,context_files,expected_args,stdout,returncode", CASES)
-    def test_run(self, prompt, context_files, expected_args, stdout, returncode):
+    @pytest.mark.parametrize("prompt,context_files,cwd,expected_args,stdout,returncode", CASES)
+    def test_run(self, prompt, context_files, cwd, expected_args, stdout, returncode):
         mock_result = MagicMock()
         mock_result.stdout = stdout + "\n"
         mock_result.returncode = returncode
 
         with patch("subprocess.run", return_value=mock_result) as mock_run:
-            result = ClaudeDriver().run(prompt, context_files)
+            result = ClaudeDriver().run(prompt, context_files, cwd=cwd)
 
         mock_run.assert_called_once_with(
-            expected_args, capture_output=True, text=True
+            expected_args, capture_output=True, text=True, cwd=cwd
         )
         assert result.text == stdout
         assert result.exit_code == returncode
@@ -127,10 +204,55 @@ class TestClaudeDriverRun:
         assert "important context" in called_prompt
         assert "prompt" in called_prompt
 
+    def test_run_passes_cwd_to_subprocess(self, tmp_path):
+        mock_result = MagicMock(stdout="ok\n", returncode=0)
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            ClaudeDriver().run("prompt", cwd=tmp_path)
+
+        assert mock_run.call_args[1]["cwd"] == tmp_path
+
 
 # ── ClaudeDriver.run_subagent ─────────────────────────────────────────────────
 
 class TestClaudeDriverRunSubagent:
+    def test_uses_allowed_tools_when_tools_declared(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "planner.md").write_text(
+            "---\nname: planner\ntools: Read, Glob, Grep\n---\nYou are the planner."
+        )
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        mock_result = MagicMock(stdout="plan written\n", returncode=0)
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            result = ClaudeDriver().run_subagent("planner", "explore")
+
+        cmd = mock_run.call_args[0][0]
+        assert "--allowedTools" in cmd
+        assert "Read,Glob,Grep" in cmd
+        assert "--dangerously-skip-permissions" not in cmd
+        assert "You are the planner." in cmd[-1]
+        assert "explore" in cmd[-1]
+        assert result.text == "plan written"
+
+    def test_uses_dangerously_skip_when_no_tools_declared(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "worker.md").write_text("---\nname: worker\n---\nYou work.")
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        mock_result = MagicMock(stdout="done\n", returncode=0)
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            ClaudeDriver().run_subagent("worker", "task")
+
+        cmd = mock_run.call_args[0][0]
+        assert "--dangerously-skip-permissions" in cmd
+        assert "--allowedTools" not in cmd
+
     def test_composes_agent_body_into_prompt(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "agents"
         agent_dir.mkdir()

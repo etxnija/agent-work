@@ -61,6 +61,30 @@ Session-to-session progress log. Distinct from AGENTS.md (which holds stable rul
 - ADR-0008 written; roadmap updated with Phase 1.2 between Phase 1 and Phase 2
 - 43 tests passing (up from 32): added _parse_tasks, _task_title, per-task execution, mid-task failure, per-task status check
 
+## 2026-07-31 — Phase 1.1 follow-up: permission boundary
+
+### Done
+- SandboxRuntime ABC + WorkspaceHandle(path, branch, keep()) in runner/sandbox/base.py
+- GitWorktreeSandbox: disposable branch + temp worktree per worker run; branch kept on success, discarded on failure
+- NoopSandbox: pass-through for tests and no-git projects
+- get_sandbox() factory via AGENT_SANDBOX env var (default: worktree)
+- ClaudeDriver.run_subagent: reads tools: frontmatter; uses --allowedTools for planner, --dangerously-skip-permissions only for agents without declared tools
+- AgentDriver.run() + ClaudeDriver.run(): added cwd: Path | None = None parameter
+- loop.py: uses sandbox context manager around per-task worker loop; absolute paths for context files; handle.keep() on success
+- ADR-0009 written; roadmap Phase 1.1 inserted between Phase 1 and Phase 1.2
+- AGENTS.md: updated architecture table, design rules, gotchas
+- 69 tests passing (up from 43): 16 new sandbox tests, updated driver + loop tests
+
+## 2026-07-31 — Phase 1.1 follow-up: permission boundary
+
+### Done
+- .claude/settings.json: permissions allow (pytest, git add/commit/status/diff/log, mise run) + deny (rm -rf, git push, curl, pip install, secrets) + hook registration
+- .claude/hooks/block-destructive.sh: PreToolUse Python script; blocks rm -rf variants, git push --force, sudo, dd if=, block-device writes; fires even with --dangerously-skip-permissions
+- Decision: keep --dangerously-skip-permissions for worker (can't enumerate all project-specific commands in allow list; hook + deny provide the safety layer); documented in ADR-0009
+- Bootstrap generates settings.json (language-specific allow additions) + copies hook to every new project; tested with python lang
+- ADR-0009 updated with permission-boundary section and --dangerously-skip-permissions rationale
+- AGENTS.md gotchas rewritten to reflect three-layer model (tool grant / hook / allow list)
+
 ## Session end: 2026-07-30
 
 Phase 1 complete. Trial run on ev-decide passed. Next session: Phase 2 (sensors).

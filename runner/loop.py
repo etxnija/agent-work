@@ -6,8 +6,9 @@ Usage (via CLI after pip install -e):
     agent loop   # prompts interactively
 
 Environment:
-    AGENT_TOOL   driver to use (default: claude)
-    AGENT_MODE   approval gate to use (default: interactive)
+    AGENT_TOOL     driver to use (default: claude)
+    AGENT_MODE     approval gate to use (default: interactive)
+    AGENT_SANDBOX  sandbox backend to use (default: worktree)
 """
 
 import hashlib
@@ -18,6 +19,7 @@ from pathlib import Path
 
 from .drivers import get_driver
 from .gates import get_gate
+from .sandbox import get_sandbox
 
 PLAN_FILE = "plan.md"
 AGENTS_MD = "AGENTS.md"
@@ -85,8 +87,15 @@ def run_loop(task: str) -> int:
     """
     driver = get_driver()
     gate = get_gate()
+    sandbox = get_sandbox()
+
+    project_root = Path.cwd().resolve()
+    plan_abs = str(project_root / PLAN_FILE)
+    agents_abs = str(project_root / AGENTS_MD)
+    status_abs = str(project_root / STATUS_MD)
 
     # ── 1. Plan ──────────────────────────────────────────────────────────────
+    # Planner runs in the project root (read-only; no sandbox needed).
     print(f"\n[planner] Task: {task!r}")
     print("[planner] Exploring codebase…")
 
@@ -130,35 +139,39 @@ def run_loop(task: str) -> int:
 
     print(f"\n[loop] {len(tasks)} task(s) to implement.")
 
-    # ── 4. Implement task by task ─────────────────────────────────────────────
-    for i, task_text in enumerate(tasks, 1):
-        print(f"\n[worker] Task {i}/{len(tasks)}: {_task_title(task_text)}")
+    # ── 4. Implement task by task (inside sandbox) ────────────────────────────
+    with sandbox.workspace(project_root) as handle:
+        for i, task_text in enumerate(tasks, 1):
+            print(f"\n[worker] Task {i}/{len(tasks)}: {_task_title(task_text)}")
 
-        status_hash_before = _file_hash(STATUS_MD)
+            status_hash_before = _file_hash(status_abs)
 
-        worker_prompt = (
-            f"Implement this specific task from the approved plan in {PLAN_FILE}:\n\n"
-            f"{task_text}\n\n"
-            f"Implement only this task — do not work ahead to other tasks.\n"
-            f"Follow all conventions in {AGENTS_MD}.\n"
-            f"After completing, append a one-line summary of what you did to {STATUS_MD} "
-            f"under today's date ({date.today().isoformat()})."
-        )
-        worker_result = driver.run(
-            worker_prompt,
-            context_files=[PLAN_FILE, AGENTS_MD, STATUS_MD],
-        )
+            worker_prompt = (
+                f"Implement this specific task from the approved plan in {plan_abs}:\n\n"
+                f"{task_text}\n\n"
+                f"Implement only this task — do not work ahead to other tasks.\n"
+                f"Follow all conventions in {agents_abs}.\n"
+                f"After completing, append a one-line summary of what you did to {status_abs} "
+                f"under today's date ({date.today().isoformat()})."
+            )
+            worker_result = driver.run(
+                worker_prompt,
+                context_files=[plan_abs, agents_abs, status_abs],
+                cwd=handle.path,
+            )
 
-        if worker_result.exit_code != 0:
-            print(f"[error] Worker failed on task {i}/{len(tasks)}:\n{worker_result.text}")
-            print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
-            return 1
+            if worker_result.exit_code != 0:
+                print(f"[error] Worker failed on task {i}/{len(tasks)}:\n{worker_result.text}")
+                print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
+                return 1  # handle._keep is False → sandbox discards the branch
 
-        if _file_hash(STATUS_MD) == status_hash_before:
-            print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
+            if _file_hash(status_abs) == status_hash_before:
+                print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
 
-        # Phase 2: run sensors here (lint, test, coverage)
-        # Phase 3: git commit per task here
+            # Phase 2: run sensors here (lint, test, coverage)
+            # Phase 3: git commit per task here
+
+        handle.keep()  # all tasks complete → preserve the branch for Phase 3 merge
 
     print(f"\n[loop] All {len(tasks)} tasks complete.")
     return 0

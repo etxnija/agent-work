@@ -6,15 +6,19 @@ Usage (via CLI after pip install -e):
 
 Creates:
     <project-dir>/
-        AGENTS.md           harness conventions for this project
+        AGENTS.md               harness conventions for this project
         memory/
-            status.md       session work log
-        agents/             sub-agent definitions (populated from harness)
-        sensors/            lint/test/lsp scripts (language-specific stubs)
+            status.md           session work log
+        agents/                 sub-agent definitions (populated from harness)
+        sensors/                lint/test/lsp scripts (language-specific stubs)
         .claude/
-            agents/         symlink or copy of agents/ for Claude Code
+            agents/             planner sub-agent (for Claude Code interactive sessions)
+            settings.json       permissions allow/deny list + PreToolUse hook registration
+            hooks/
+                block-destructive.sh    blocks rm -rf, force-push, sudo, etc.
 """
 
+import json
 import re
 import shutil
 from pathlib import Path
@@ -105,6 +109,38 @@ MISE_TOML_TEMPLATE = """\
 python = "{python_version}"
 """
 
+# Base allow list (all projects). Language-specific commands added below.
+_SETTINGS_ALLOW_BASE = [
+    "Bash(mise run*)",
+    "Bash(git add*)",
+    "Bash(git commit*)",
+    "Bash(git status*)",
+    "Bash(git diff*)",
+    "Bash(git log*)",
+    "Bash(git branch*)",
+]
+
+_SETTINGS_ALLOW_LANG = {
+    "go":         ["Bash(go test*)", "Bash(go build*)", "Bash(golangci-lint*)"],
+    "typescript": ["Bash(npm test*)", "Bash(npm run*)", "Bash(npx eslint*)"],
+    "python":     ["Bash(pytest*)", "Bash(python -m pytest*)", "Bash(ruff*)"],
+    "":           [],
+}
+
+_SETTINGS_DENY = [
+    "Bash(rm -rf*)",
+    "Bash(git push*)",
+    "Bash(curl*)",
+    "Bash(wget*)",
+    "Bash(sudo*)",
+    "Bash(pip install*)",
+    "Read(./.env)",
+    "Read(./.env.*)",
+    "Read(~/.ssh/**)",
+    "Read(~/.aws/**)",
+    "Read(~/.claude/**)",
+]
+
 SENSORS = {
     "go": {
         "lint.sh": "#!/bin/sh\nset -e\ngolangci-lint run ./...\n",
@@ -125,6 +161,33 @@ SENSORS = {
 }
 
 
+def _settings_json(lang: str) -> str:
+    """Generate .claude/settings.json content for the given language."""
+    allow = _SETTINGS_ALLOW_BASE + _SETTINGS_ALLOW_LANG.get(lang, [])
+    return json.dumps(
+        {
+            "permissions": {
+                "allow": allow,
+                "deny": _SETTINGS_DENY,
+            },
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/block-destructive.sh",
+                            }
+                        ],
+                    }
+                ]
+            },
+        },
+        indent=2,
+    ) + "\n"
+
+
 def bootstrap(project_dir: Path, lang: str) -> None:
     if project_dir.exists() and any(project_dir.iterdir()):
         print(f"Warning: {project_dir} is not empty. Skipping existing files.")
@@ -134,6 +197,7 @@ def bootstrap(project_dir: Path, lang: str) -> None:
     (project_dir / "agents").mkdir(exist_ok=True)
     (project_dir / "sensors").mkdir(exist_ok=True)
     (project_dir / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
+    (project_dir / ".claude" / "hooks").mkdir(parents=True, exist_ok=True)
 
     # AGENTS.md
     agents_md = project_dir / "AGENTS.md"
@@ -188,6 +252,20 @@ def bootstrap(project_dir: Path, lang: str) -> None:
             sensor.write_text(content)
             sensor.chmod(0o755)
             print(f"  created {sensor.relative_to(project_dir)}")
+
+    # .claude/settings.json — permissions allow/deny + hook registration
+    settings = project_dir / ".claude" / "settings.json"
+    if not settings.exists():
+        settings.write_text(_settings_json(lang))
+        print(f"  created {settings.relative_to(project_dir)}")
+
+    # .claude/hooks/block-destructive.sh — copied from the harness
+    src_hook = HARNESS_ROOT / ".claude" / "hooks" / "block-destructive.sh"
+    dest_hook = project_dir / ".claude" / "hooks" / "block-destructive.sh"
+    if not dest_hook.exists() and src_hook.exists():
+        shutil.copy(src_hook, dest_hook)
+        dest_hook.chmod(0o755)
+        print(f"  created {dest_hook.relative_to(project_dir)}")
 
     print(f"\nDone. Project ready at {project_dir}")
     print("Next: edit AGENTS.md with project-specific conventions, then run the planner.")

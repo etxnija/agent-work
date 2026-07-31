@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -17,8 +18,13 @@ class AgentDriver(ABC):
     """
 
     @abstractmethod
-    def run(self, prompt: str, context_files: list[str] = []) -> AgentResult:
-        """Send a prompt, return the result."""
+    def run(
+        self,
+        prompt: str,
+        context_files: list[str] = [],
+        cwd: Path | None = None,
+    ) -> AgentResult:
+        """Send a prompt, return the result. cwd sets the working directory for the agent process."""
         ...
 
     @abstractmethod

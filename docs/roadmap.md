@@ -28,6 +28,25 @@ Trial run: ev-decide (TypeScript). Planner explored a real codebase; worker adde
 
 ---
 
+## Phase 1.1 — Sandboxing baseline ✅
+
+Goal: close the concrete sandboxing gap found in code review without new dependencies. See ADR-0009.
+
+| Item | Status |
+|---|---|
+| `SandboxRuntime` ABC + `get_sandbox()` factory (mirrors AgentDriver/ApprovalGate pattern) | ✅ |
+| `GitWorktreeSandbox` — disposable branch + worktree per worker run | ✅ |
+| `NoopSandbox` — pass-through for testing / no-git projects | ✅ |
+| Planner uses `--allowedTools Read,Glob,Grep` instead of `--dangerously-skip-permissions` | ✅ |
+| `ClaudeDriver.run_subagent` reads `tools:` from agent frontmatter to select flag | ✅ |
+| Worker context files passed as absolute paths (cwd-independent) | ✅ |
+| `.claude/settings.json` — permissions allow/deny list for expected worker commands | ✅ |
+| `.claude/hooks/block-destructive.sh` — PreToolUse hook blocking rm -rf, force-push, sudo etc. | ✅ |
+| Bootstrap generates settings.json + copies hook into every new project | ✅ |
+| Tests: `runner/sandbox/test_sandbox.py` (16 passing); loop + driver tests updated (69 total) | ✅ |
+
+---
+
 ## Phase 1.2 — Per-task implementation ✅
 
 Goal: plan size, diff size, and PR size are all bounded. Prerequisite for Phase 2 sensor feedback to be locally actionable and for Phase 3/4 commits and PRs to be reviewably sized. See ADR-0008.

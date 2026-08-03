@@ -13,6 +13,7 @@ from runner.loop import (
     _commit_task,
     _offer_merge,
     _parse_tasks,
+    _run_sensors,
     _task_title,
     run_loop,
 )
@@ -139,6 +140,48 @@ class TestTaskTitle:
     @pytest.mark.parametrize("task_text,expected", CASES)
     def test_title(self, task_text, expected):
         assert _task_title(task_text) == expected
+
+
+# ── _run_sensors ──────────────────────────────────────────────────────────────
+
+class TestRunSensors:
+    def test_all_sensors_pass_returns_empty(self, tmp_path):
+        sensors = tmp_path / "sensors"
+        sensors.mkdir()
+        (sensors / "lint.sh").write_text("#!/bin/sh\nexit 0\n")
+        (sensors / "test.sh").write_text("#!/bin/sh\nexit 0\n")
+
+        assert _run_sensors(tmp_path) == []
+
+    def test_one_sensor_fails_captures_name_and_output(self, tmp_path):
+        sensors = tmp_path / "sensors"
+        sensors.mkdir()
+        (sensors / "lint.sh").write_text("#!/bin/sh\necho 'lint error' >&2\nexit 1\n")
+        (sensors / "test.sh").write_text("#!/bin/sh\nexit 0\n")
+
+        failures = _run_sensors(tmp_path)
+
+        assert len(failures) == 1
+        name, output = failures[0]
+        assert name == "lint.sh"
+        assert "lint error" in output
+
+    def test_multiple_failures_captured_in_sorted_order(self, tmp_path):
+        sensors = tmp_path / "sensors"
+        sensors.mkdir()
+        (sensors / "b_test.sh").write_text("#!/bin/sh\necho 'b failed'\nexit 1\n")
+        (sensors / "a_lint.sh").write_text("#!/bin/sh\necho 'a failed'\nexit 1\n")
+        (sensors / "c_ok.sh").write_text("#!/bin/sh\nexit 0\n")
+
+        failures = _run_sensors(tmp_path)
+
+        assert [name for name, _ in failures] == ["a_lint.sh", "b_test.sh"]
+        outputs = dict(failures)
+        assert "a failed" in outputs["a_lint.sh"]
+        assert "b failed" in outputs["b_test.sh"]
+
+    def test_no_sensors_directory_returns_empty(self, tmp_path):
+        assert _run_sensors(tmp_path) == []
 
 
 # ── Planner failures ──────────────────────────────────────────────────────────

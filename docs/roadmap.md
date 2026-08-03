@@ -68,11 +68,28 @@ Goal: the loop gets deterministic feedback on what the worker produces. The work
 
 | Item | Status |
 |---|---|
-| `sensors/lint.sh` — linter runs after worker, output fed back | pending |
-| `sensors/test.sh` — test suite runs after worker, failures fed back | pending |
-| LSP feedback — type errors injected into worker context | pending |
+| `sensors/lint.sh` — linter runs after worker, output fed back | ✅ |
+| `sensors/test.sh` — test suite runs after worker, failures fed back | ✅ |
+| LSP feedback (batch-CLI: `pyright`, Python only) — type errors injected into worker context | ✅ |
 | 100% test coverage enforced on new code | pending |
 | Metrics — track pass/fail, token cost per loop run | pending |
+
+---
+
+## Phase 2.1 — Sensor presets & sync
+
+Goal: opinionated sensor defaults (what "clean" means per stack) scale to new
+languages and stack variants without editing harness source, and already-bootstrapped
+projects can pull updated opinions on demand without losing local overrides. See
+ADR-0011.
+
+| Item | Status |
+|---|---|
+| Presets moved from `bootstrap.py`'s `SENSORS` dict to `presets/<lang>/*.sh` files | pending |
+| Bootstrap copies preset files into new project's `sensors/` (still standalone, no runtime harness dependency) | pending |
+| Bootstrap prompts for a per-sensor command override, preset pre-filled as default | pending |
+| `agent sensors sync` — diff project's `sensors/` against current presets, apply per-file with review | pending |
+| Coverage / code-health sensors added as new presets (reuse `_run_sensors()`, no `loop.py` changes) | pending |
 
 ---
 
@@ -88,6 +105,9 @@ Goal: the loop learns across sessions and recovers from known failure modes with
 | Per-task git commit in worktree branch | ✅ |
 | Interactive merge prompt after successful run (y/n fast-forward into main) | ✅ |
 | PR creation for review | pending |
+| **Keep the branch on task failure instead of `git branch -D`** — today any failed task discards every already-completed task's commits on that run, not just the failing one (`runner/sandbox/worktree.py`) | pending |
+| `agent loop --resume` — detect an existing `agent/*` branch with completed task commits, skip them, continue from the first incomplete task | pending — blocked by the item above |
+| `agent loop --plan <path>` (or auto-detected prompt) — approve/execute an existing `plan.md` without re-running the planner | pending |
 
 ---
 
@@ -111,6 +131,5 @@ Goal: scale up autonomy — overnight runs, model routing, adversarial review.
 ## Open questions
 
 - Multi-engineer versioning: single-player for now; design in from Phase 4 or later?
-- Which LSP(s) to wire up first in Phase 2?
 - Model router: custom routing logic or existing framework?
 - Local model hosting: in scope for Phase 4 or later?

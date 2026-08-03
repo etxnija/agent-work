@@ -28,6 +28,7 @@ STATUS_MD = "memory/status.md"
 
 PLANNER_AGENT = "planner"
 PLAN_READY_SIGNAL = "PLAN READY"
+SENSOR_RETRY_LIMIT = 2
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -77,6 +78,24 @@ def _task_title(task_text: str) -> str:
     """First line of a task with leading 'N. ' stripped, truncated for display."""
     first_line = task_text.split('\n')[0].strip()
     return re.sub(r'^\d+\.\s+', '', first_line)[:80]
+
+
+def _run_sensors(cwd: Path) -> list[tuple[str, str]]:
+    """
+    Run every sensors/*.sh script in cwd, in sorted order.
+
+    Returns a list of (script_name, combined_output) for each sensor that
+    exited non-zero. Empty list means all sensors passed, or there is no
+    sensors/ directory at all.
+    """
+    failures = []
+    for script in sorted((cwd / "sensors").glob("*.sh")):
+        result = subprocess.run(
+            ["sh", str(script)], cwd=cwd, capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            failures.append((script.name, result.stdout + result.stderr))
+    return failures
 
 
 # ── Git helpers ──────────────────────────────────────────────────────────────
@@ -266,7 +285,46 @@ def run_loop(task: str) -> int:
             if _file_hash(status_abs) == status_hash_before:
                 print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
 
-            # Phase 2: run sensors here (lint, test, coverage)
+            failures = _run_sensors(handle.path)
+            attempt = 0
+            while failures and attempt < SENSOR_RETRY_LIMIT:
+                attempt += 1
+                print(
+                    f"[sensor] Task {i}/{len(tasks)}: "
+                    f"{', '.join(name for name, _ in failures)} failed "
+                    f"(attempt {attempt}/{SENSOR_RETRY_LIMIT})."
+                )
+                formatted_failures = "\n\n".join(
+                    f"### {name}\n{output}" for name, output in failures
+                )
+                corrective_prompt = (
+                    f"Your last change to this task produced these issues:\n\n"
+                    f"{formatted_failures}\n\n"
+                    f"Fix them and nothing else."
+                )
+                corrective_result = driver.run(
+                    corrective_prompt,
+                    context_files=[plan_abs, agents_abs, status_abs],
+                    cwd=handle.path,
+                )
+                if corrective_result.exit_code != 0:
+                    print(
+                        f"[error] Corrective worker call failed on task {i}/{len(tasks)}:\n"
+                        f"{corrective_result.text}"
+                    )
+                    break
+
+                failures = _run_sensors(handle.path)
+
+            if failures:
+                print(
+                    f"[error] Sensors still failing on task {i}/{len(tasks)} "
+                    f"after {attempt} attempt(s): "
+                    f"{', '.join(name for name, _ in failures)}."
+                )
+                print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
+                return 1  # handle._keep is False → sandbox discards the branch
+
             _commit_task(i, _task_title(task_text), handle.path)
 
         handle.keep()  # all tasks complete → preserve the branch for merge

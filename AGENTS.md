@@ -54,6 +54,19 @@ memory/           AGENTS.md (this file) + status.md (work log)
 - Tests live next to the code they test (`test_<module>.py`)
 - Do not delete tests to make coverage pass
 
+## ADR conventions
+
+- Short and sharp: ~20-30 lines total (`docs/arch/adr/0001-python-as-harness-runtime.md`
+  is the target shape). If a draft runs past ~40 lines, cut it, don't scope-expand it.
+- **Context**: one short paragraph — the problem/constraint, not a transcript of the
+  design discussion that led to the decision.
+- **Decision**: a few lines, imperative mood. The choice itself, not the reasoning
+  (that's Context) or the alternatives (mention a rejected one in a single line only
+  if it stops someone from re-litigating it later).
+- **Consequences**: a bullet list, one line each. Trade-offs accepted, not restated
+  rationale.
+- ADRs 0009 and 0011 are known outliers (80+ lines) — don't use them as the template.
+
 ## Gotchas
 
 - **`--dangerously-skip-permissions` is kept for the worker** (full tool access required; the allow list can't enumerate every project-specific command). The planner uses `--allowedTools Read,Glob,Grep` instead — no Bash, enforced at the CLI level. Do not conflate the two.

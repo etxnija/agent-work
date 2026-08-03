@@ -44,6 +44,7 @@ Goal: close the concrete sandboxing gap found in code review without new depende
 | `.claude/hooks/block-destructive.sh` — PreToolUse hook blocking rm -rf, force-push, sudo etc. | ✅ |
 | Bootstrap generates settings.json + copies hook into every new project | ✅ |
 | Tests: `runner/sandbox/test_sandbox.py` (16 passing); loop + driver tests updated (69 total) | ✅ |
+| **Known gap: `cwd`-based worktree isolation is not fully reliable** — observed 2026-08-03: a worker task wrote directly into the main checkout instead of its assigned worktree, caught and reverted most of it, but left an uncommitted leftover that collided with the next squash-merge. `GitWorktreeSandbox`'s isolation guarantee (ADR-0009) rests entirely on `cwd=worktree_path`; worth investigating whether the worker's own project-root resolution can drift from `cwd` (worktrees share the main repo's `.git` metadata) and whether passing an explicit `CLAUDE_PROJECT_DIR` env var closes it. Strengthens the case for Phase 4's container/VM sandboxing, not just a Phase 1.1 patch. | pending investigation |
 
 ---
 
@@ -117,7 +118,7 @@ Goal: scale up autonomy — overnight runs, model routing, adversarial review.
 
 | Item | Status |
 |---|---|
-| Worker sandboxing (container/VM) — **required before FileGate and Ralph loop** | pending |
+| Worker sandboxing (container/VM) — **required before FileGate and Ralph loop**; motivated further by the `cwd`-isolation leak found in Phase 1.1 (worktree sharing the main repo's `.git` isn't a hard boundary) | pending |
 | FileGate (headless approval via sentinel file) | pending — blocked by sandboxing |
 | Ralph loop (iterative: pick task → implement → validate → commit → reset → repeat) | pending — blocked by sandboxing |
 | Memory compaction (summarise status.md when it grows large) | pending |

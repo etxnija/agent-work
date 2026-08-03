@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, call, patch
 from runner.drivers.base import AgentResult
 from runner.loop import (
     PLAN_READY_SIGNAL,
+    SENSOR_RETRY_LIMIT,
     _branch_commits,
     _commit_task,
     _offer_merge,
@@ -51,6 +52,28 @@ Existing code.
 2. **Add tests** — write scoring.test.ts
    Files: src/lib/scoring.test.ts
    What: table-driven tests for computeScores
+
+## Assumptions
+None.
+
+## Risks
+None.
+
+## Out of scope
+Nothing.
+"""
+
+SINGLE_TASK_PLAN = """\
+# Plan: test
+
+## Context
+Existing code.
+
+## Tasks
+
+1. **Add config** — create vitest.config.ts
+   Files: vitest.config.ts
+   What: configure vitest
 
 ## Assumptions
 None.
@@ -393,6 +416,85 @@ class TestRunLoopPerTask:
 
         assert code == 1
         assert driver.run.call_count == 2
+
+
+# ── Sensor retry wiring ──────────────────────────────────────────────────────
+
+class TestRunLoopSensorRetry:
+    def _setup(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(SINGLE_TASK_PLAN)
+
+    def _worker_ok(self, tmp_path):
+        def worker_side_effect(prompt, context_files, cwd=None):
+            status = tmp_path / "memory" / "status.md"
+            status.write_text(status.read_text() + "- done\n")
+            return _ok()
+        return worker_side_effect
+
+    def test_sensors_pass_first_try_commits_without_retry(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", return_value=[]), \
+             patch("runner.loop._commit_task") as mock_commit, \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert code == 0
+        assert driver.run.call_count == 1  # only the worker call, no corrective retry
+        mock_commit.assert_called_once()
+
+    def test_sensors_fail_once_then_pass_retries_and_commits(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", side_effect=[[("lint.sh", "bad")], []]), \
+             patch("runner.loop._commit_task") as mock_commit, \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert code == 0
+        assert driver.run.call_count == 2  # initial worker call + one corrective call
+        mock_commit.assert_called_once()
+
+    def test_sensors_fail_every_retry_fails_closed_without_commit(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", return_value=[("lint.sh", "still bad")]), \
+             patch("runner.loop._commit_task") as mock_commit, \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert code == 1
+        assert driver.run.call_count == 1 + SENSOR_RETRY_LIMIT  # worker + every corrective retry
+        mock_commit.assert_not_called()
 
 
 # ── Status.md check per task ──────────────────────────────────────────────────

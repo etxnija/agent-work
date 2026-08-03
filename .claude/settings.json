@@ -3,6 +3,7 @@
     "allow": [
       "Bash(pytest*)",
       "Bash(python -m pytest*)",
+      "Bash(pyright*)",
       "Bash(mise run*)",
       "Bash(git add*)",
       "Bash(git commit*)",

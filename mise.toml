@@ -1,5 +1,8 @@
 [tools]
 python = "3.12"
+uv = "latest"
+"pipx:ruff" = "latest"
+"pipx:pyright" = "latest"
 
 [tasks.install]
 description = "Install the agent harness CLI (editable — no reinstall needed on edits)"

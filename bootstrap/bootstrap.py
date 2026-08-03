@@ -123,7 +123,7 @@ _SETTINGS_ALLOW_BASE = [
 _SETTINGS_ALLOW_LANG = {
     "go":         ["Bash(go test*)", "Bash(go build*)", "Bash(golangci-lint*)"],
     "typescript": ["Bash(npm test*)", "Bash(npm run*)", "Bash(npx eslint*)"],
-    "python":     ["Bash(pytest*)", "Bash(python -m pytest*)", "Bash(ruff*)"],
+    "python":     ["Bash(pytest*)", "Bash(python -m pytest*)", "Bash(ruff*)", "Bash(pyright*)"],
     "":           [],
 }
 
@@ -153,10 +153,12 @@ SENSORS = {
     "python": {
         "lint.sh": "#!/bin/sh\nset -e\nruff check .\n",
         "test.sh": "#!/bin/sh\nset -e\npytest\n",
+        "lsp.sh": "#!/bin/sh\nset -e\npyright --outputjson\n",
     },
     "": {
         "lint.sh": "#!/bin/sh\n# TODO: add lint command for your stack\necho 'lint: not configured'\n",
         "test.sh": "#!/bin/sh\n# TODO: add test command for your stack\necho 'test: not configured'\n",
+        "lsp.sh": "#!/bin/sh\n# TODO: add LSP/type-check command for your stack\necho 'lsp: not configured'\n",
     },
 }
 

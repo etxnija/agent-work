@@ -133,3 +133,31 @@ Phase 1 complete. Trial run on ev-decide passed. Next session: Phase 2 (sensors)
 - Squash-merge of the lint-fix branch initially failed: `runner/test_loop.py` had an uncommitted local change on `main` (6 `check=False` lines) colliding with the branch. Root cause: task 7's worker briefly wrote directly into the main checkout instead of its worktree, caught and reverted most of it (self-reported in its own task-7 status.md entry above), but left this leftover behind. Discarded the leaked local copy (subset of what the branch already had), retried the squash — succeeded, `ruff check .` clean, all 84 tests pass. Logged as a known sandbox-isolation gap in roadmap Phase 1.1 (`cwd`-based worktree isolation isn't a hard boundary — worktrees share the main repo's `.git`) and cross-referenced from Phase 4's container/VM sandboxing item. Not yet investigated further.
 - Time-boxed investigation into the isolation leak: ruled out a `cwd`-passing bug in `runner/drivers/claude.py` (confirmed correct via code read) and ruled out "absolute-path context files anchor the model" as the mechanism (two isolated `claude --print` reproduction attempts against a real throwaway worktree, both isolated correctly — including one deliberately mirroring the real prompt shape with an absolute-path context file next to a relative-path task). Could not reproduce the actual leak in isolation; root cause remains open, likely occasional model drift during longer/error-recovery sessions rather than a deterministic bug.
 - Implemented the detect-not-prevent mitigation instead: `_main_checkout_dirty_paths()` in `runner/loop.py` snapshots `git status` on the main checkout before/after each task, excluding `status.md` (the one intentional absolute-path write); prints a same-task `[warning]` listing any other leaked paths rather than only surfacing at squash-merge time. 6 new tests (4 real-git-repo tests for the helper, 2 mocked wiring tests for the warning) — 90 total passing, `ruff check .` and `pyright` both clean. Roadmap Phase 1.1 updated: root cause left open, mitigation marked done.
+
+## Session end: 2026-08-03
+
+Phase 2 (sensors) is done: lint/test/LSP sensors wired into a generic retry
+mechanism, Python-only LSP via `pyright`. Landed via `agent loop` with real
+follow-up cleanup (a run left tasks stranded on a deleted branch and a
+missing test class — both recovered and fixed). `ruff`/`pyright`/`uv` now
+pinned in this project's own `mise.toml` (were not installed on this
+machine before today, so the sensors were previously unusable). A repo-wide
+lint cleanup (49→0 ruff errors) also ran via `agent loop` today — first real
+dogfood of the sensor-retry mechanism.
+
+Found and partially addressed a real sandboxing gap: the worker can
+occasionally write outside its assigned git worktree into the main
+checkout. Root cause not identified (time-boxed investigation, see above);
+a detection safety net (`_main_checkout_dirty_paths`) now warns same-task
+instead of surfacing as a confusing squash-merge conflict later. Logged in
+roadmap Phase 1.1 and Phase 4.
+
+`main` is clean, all committed (5 commits ahead of `origin/main`, not
+pushed). `plan.md` is stale (last completed lint-fix plan) — harmless,
+gitignored, overwritten fresh by the next `agent loop` run.
+
+Next session: Phase 2.1 (sensor presets & sync, see ADR-0011) or Phase 3's
+three tracked gaps (keep-branch-on-failure, `agent loop --resume`,
+`agent loop --plan <path>`) — see roadmap for the fuller list. The
+worktree-isolation root cause is also still open if it's worth another look.
+

@@ -14,6 +14,7 @@ from runner.loop import (
     SENSOR_RETRY_LIMIT,
     _branch_commits,
     _commit_task,
+    _main_checkout_dirty_paths,
     _offer_merge,
     _parse_tasks,
     _run_sensors,
@@ -499,6 +500,66 @@ class TestRunLoopSensorRetry:
         mock_commit.assert_not_called()
 
 
+# ── Main-checkout leak detection ─────────────────────────────────────────────
+
+class TestRunLoopMainCheckoutLeak:
+    def _setup(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(SINGLE_TASK_PLAN)
+
+    def _worker_ok(self, tmp_path):
+        def worker_side_effect(prompt, context_files, cwd=None):
+            status = tmp_path / "memory" / "status.md"
+            status.write_text(status.read_text() + "- done\n")
+            return _ok()
+        return worker_side_effect
+
+    def test_no_leak_prints_no_warning(self, tmp_path, monkeypatch, capsys):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", return_value=[]), \
+             patch("runner.loop._main_checkout_dirty_paths", return_value=[]):
+            code = run_loop("task")
+
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "wrote outside its sandboxed worktree" not in out
+
+    def test_leak_prints_warning_but_does_not_stop_the_loop(self, tmp_path, monkeypatch, capsys):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", return_value=[]), \
+             patch(
+                 "runner.loop._main_checkout_dirty_paths",
+                 side_effect=[[], ["runner/loop.py"]],
+             ):
+            code = run_loop("task")
+
+        assert code == 0  # warns, does not fail the task
+        out = capsys.readouterr().out
+        assert "wrote outside its sandboxed worktree" in out
+        assert "runner/loop.py" in out
+
+
 # ── Status.md check per task ──────────────────────────────────────────────────
 
 class TestRunLoopStatusCheckPerTask:
@@ -598,6 +659,42 @@ class TestCommitTask:
         log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
                              capture_output=True, text=True, check=False).stdout
         assert log.strip().count("\n") == 0  # single commit
+
+
+class TestMainCheckoutDirtyPaths:
+    def _init_repo(self, path: Path) -> None:
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+        (path / "memory").mkdir()
+        (path / "memory" / "status.md").write_text("# Status\n")
+        subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"],
+                       cwd=path, check=True, capture_output=True, env=env)
+
+    def test_clean_checkout_returns_empty(self, tmp_path):
+        self._init_repo(tmp_path)
+        status_abs = str(tmp_path / "memory" / "status.md")
+        assert _main_checkout_dirty_paths(tmp_path, status_abs) == []
+
+    def test_status_md_change_alone_is_excluded(self, tmp_path):
+        self._init_repo(tmp_path)
+        status_abs = str(tmp_path / "memory" / "status.md")
+        (tmp_path / "memory" / "status.md").write_text("# Status\n- did task\n")
+        assert _main_checkout_dirty_paths(tmp_path, status_abs) == []
+
+    def test_other_file_change_is_reported(self, tmp_path):
+        self._init_repo(tmp_path)
+        status_abs = str(tmp_path / "memory" / "status.md")
+        (tmp_path / "leaked.py").write_text("# oops\n")
+        assert _main_checkout_dirty_paths(tmp_path, status_abs) == ["leaked.py"]
+
+    def test_status_md_and_other_file_reports_only_the_other_file(self, tmp_path):
+        self._init_repo(tmp_path)
+        status_abs = str(tmp_path / "memory" / "status.md")
+        (tmp_path / "memory" / "status.md").write_text("# Status\n- did task\n")
+        (tmp_path / "leaked.py").write_text("# oops\n")
+        assert _main_checkout_dirty_paths(tmp_path, status_abs) == ["leaked.py"]
 
 
 class TestBranchCommits:

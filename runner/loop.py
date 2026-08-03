@@ -79,6 +79,30 @@ def _task_title(task_text: str) -> str:
     return re.sub(r'^\d+\.\s+', '', first_line)[:80]
 
 
+def _main_checkout_dirty_paths(project_root: Path, status_abs: str) -> list[str]:
+    """
+    Return paths (relative to project_root) with uncommitted changes in the main
+    checkout, excluding status_abs — the one file workers intentionally write
+    there directly via absolute path, by design (see AGENTS.md).
+
+    A worker runs with cwd set to its sandboxed worktree; anything else showing
+    up dirty here means it wrote outside that sandbox.
+    """
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=project_root, capture_output=True, text=True, check=False,
+    )
+    status_rel = str(Path(status_abs).resolve().relative_to(project_root))
+    paths = []
+    for line in result.stdout.splitlines():
+        path = line[3:].strip()
+        if " -> " in path:  # rename: "old -> new"
+            path = path.split(" -> ", 1)[1]
+        if path != status_rel:
+            paths.append(path)
+    return paths
+
+
 def _run_sensors(cwd: Path) -> list[tuple[str, str]]:
     """
     Run every sensors/*.sh script in cwd, in sorted order.
@@ -267,6 +291,7 @@ def run_loop(task: str) -> int:
             print(f"\n[worker] Task {i}/{len(tasks)}: {_task_title(task_text)}")
 
             status_hash_before = _file_hash(status_abs)
+            main_dirty_before = _main_checkout_dirty_paths(project_root, status_abs)
 
             worker_prompt = (
                 f"Implement this specific task from the approved plan in {plan_abs}:\n\n"
@@ -329,6 +354,16 @@ def run_loop(task: str) -> int:
                 )
                 print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
                 return 1  # handle._keep is False → sandbox discards the branch
+
+            main_dirty_after = _main_checkout_dirty_paths(project_root, status_abs)
+            leaked = sorted(set(main_dirty_after) - set(main_dirty_before))
+            if leaked:
+                print(
+                    f"[warning] Task {i}/{len(tasks)}: the worker wrote outside its "
+                    f"sandboxed worktree, into the main checkout: {', '.join(leaked)}. "
+                    f"This should not happen (see AGENTS.md sandboxing gotchas) — "
+                    f"inspect and resolve with `git status`/`git diff` before merging."
+                )
 
             _commit_task(i, _task_title(task_text), handle.path)
 

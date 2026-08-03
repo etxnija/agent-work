@@ -1,7 +1,6 @@
 """Tests for ClaudeDriver and its helpers."""
 
-import subprocess
-from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,11 +13,10 @@ from runner.drivers.claude import (
     _parse_frontmatter,
 )
 
-
 # ── _parse_frontmatter ────────────────────────────────────────────────────────
 
 class TestParseFrontmatter:
-    CASES = [
+    CASES: ClassVar[list] = [
         pytest.param(
             "---\nname: test\ntools: Read, Glob\n---\nBody here",
             {"name": "test", "tools": "Read, Glob"},
@@ -49,7 +47,7 @@ class TestParseFrontmatter:
 # ── _load_agent_body ──────────────────────────────────────────────────────────
 
 class TestLoadAgentBody:
-    CASES = [
+    CASES: ClassVar[list] = [
         pytest.param(
             "---\nname: test\ntools: Read\n---\nBody content here",
             "Body content here",
@@ -156,7 +154,7 @@ class TestInjectContext:
 # ── ClaudeDriver.run ──────────────────────────────────────────────────────────
 
 class TestClaudeDriverRun:
-    CASES = [
+    CASES: ClassVar[list] = [
         pytest.param(
             "hello",
             [],
@@ -187,7 +185,7 @@ class TestClaudeDriverRun:
             result = ClaudeDriver().run(prompt, context_files, cwd=cwd)
 
         mock_run.assert_called_once_with(
-            expected_args, capture_output=True, text=True, cwd=cwd
+            expected_args, capture_output=True, text=True, cwd=cwd, check=False
         )
         assert result.text == stdout
         assert result.exit_code == returncode

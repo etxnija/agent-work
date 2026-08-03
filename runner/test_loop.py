@@ -2,9 +2,11 @@
 
 import os
 import subprocess
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from typing import ClassVar
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from runner.drivers.base import AgentResult
 from runner.loop import (
@@ -89,7 +91,7 @@ Nothing.
 # ── _parse_tasks ──────────────────────────────────────────────────────────────
 
 class TestParseTasks:
-    CASES = [
+    CASES: ClassVar[list] = [
         pytest.param(
             MINIMAL_PLAN,
             2,
@@ -142,7 +144,7 @@ class TestParseTasks:
 # ── _task_title ───────────────────────────────────────────────────────────────
 
 class TestTaskTitle:
-    CASES = [
+    CASES: ClassVar[list] = [
         pytest.param(
             "1. **Add config** — create vitest.config.ts\n   Files: vitest.config.ts",
             "**Add config** — create vitest.config.ts",
@@ -210,7 +212,7 @@ class TestRunSensors:
 # ── Planner failures ──────────────────────────────────────────────────────────
 
 class TestRunLoopPlannerFailures:
-    CASES = [
+    CASES: ClassVar[list] = [
         pytest.param(_fail("subprocess error"), False, 1, id="planner_nonzero_exit"),
         pytest.param(_ok(PLAN_READY_SIGNAL), False, 1, id="planner_ok_but_no_plan_file"),
     ]
@@ -298,7 +300,7 @@ class TestRunLoopPerTask:
 
         def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
-            status.write_text(status.read_text() + f"- done\n")
+            status.write_text(status.read_text() + "- done\n")
             return _ok()
 
         driver.run.side_effect = worker_side_effect
@@ -583,7 +585,7 @@ class TestCommitTask:
         (tmp_path / "new.txt").write_text("hello")
         _commit_task(1, "Add greeting", tmp_path)
         log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
-                             capture_output=True, text=True).stdout
+                             capture_output=True, text=True, check=False).stdout
         assert "Task 1: Add greeting" in log
         assert "committed" in capsys.readouterr().out.lower()
 
@@ -594,7 +596,7 @@ class TestCommitTask:
         assert "nothing" in out.lower()
         # still only the init commit
         log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
-                             capture_output=True, text=True).stdout
+                             capture_output=True, text=True, check=False).stdout
         assert log.strip().count("\n") == 0  # single commit
 
 
@@ -650,12 +652,12 @@ class TestOfferMerge:
 
         # branch deleted
         branches = subprocess.run(["git", "branch"], cwd=tmp_path,
-                                  capture_output=True, text=True).stdout
+                                  capture_output=True, text=True, check=False).stdout
         assert "agent/feat" not in branches
 
         # main has exactly one new commit (not two)
         log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
-                             capture_output=True, text=True).stdout.strip().splitlines()
+                             capture_output=True, text=True, check=False).stdout.strip().splitlines()
         assert len(log) == 2  # init + one squash commit
         assert "add a and b" in log[0]  # subject is the task description
 
@@ -670,10 +672,12 @@ class TestOfferMerge:
         assert "agent/feat" in out  # instructions mention the branch name
         assert "--squash" in out    # squash-merge instructions, not ff
         branches = subprocess.run(["git", "branch"], cwd=tmp_path,
-                                  capture_output=True, text=True).stdout
+                                  capture_output=True, text=True, check=False).stdout
         assert "agent/feat" in branches
         # cleanup
-        subprocess.run(["git", "branch", "-D", "agent/feat"], cwd=tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "branch", "-D", "agent/feat"], cwd=tmp_path, capture_output=True, check=False
+        )
 
     def test_noop_sandbox_skips_merge_offer(self, tmp_path, monkeypatch, capsys):
         """NoopSandbox yields branch=''; run_loop must not call _offer_merge."""

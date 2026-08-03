@@ -3,6 +3,7 @@
 import os
 import subprocess
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -10,7 +11,6 @@ from runner.sandbox import get_sandbox
 from runner.sandbox.base import WorkspaceHandle
 from runner.sandbox.noop import NoopSandbox
 from runner.sandbox.worktree import GitWorktreeSandbox
-
 
 # ── WorkspaceHandle ───────────────────────────────────────────────────────────
 
@@ -123,7 +123,7 @@ class TestGitWorktreeSandbox:
 # ── get_sandbox factory ───────────────────────────────────────────────────────
 
 class TestGetSandbox:
-    CASES = [
+    CASES: ClassVar[list] = [
         pytest.param("worktree", GitWorktreeSandbox, id="worktree"),
         pytest.param("noop", NoopSandbox, id="noop"),
     ]

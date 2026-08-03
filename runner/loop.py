@@ -14,8 +14,7 @@ Environment:
 import hashlib
 import re
 import subprocess
-import sys
-from datetime import date
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .drivers import get_driver
@@ -91,7 +90,7 @@ def _run_sensors(cwd: Path) -> list[tuple[str, str]]:
     failures = []
     for script in sorted((cwd / "sensors").glob("*.sh")):
         result = subprocess.run(
-            ["sh", str(script)], cwd=cwd, capture_output=True, text=True
+            ["sh", str(script)], cwd=cwd, capture_output=True, text=True, check=False
         )
         if result.returncode != 0:
             failures.append((script.name, result.stdout + result.stderr))
@@ -107,7 +106,7 @@ def _commit_task(task_num: int, title: str, worktree: Path) -> None:
     Skips silently if there is nothing to commit (e.g. worker only updated
     status.md, which is written to the project root via absolute path).
     """
-    add = subprocess.run(["git", "add", "-A"], cwd=worktree, capture_output=True)
+    add = subprocess.run(["git", "add", "-A"], cwd=worktree, capture_output=True, check=False)
     if add.returncode != 0:
         return
 
@@ -116,6 +115,7 @@ def _commit_task(task_num: int, title: str, worktree: Path) -> None:
         cwd=worktree,
         capture_output=True,
         text=True,
+        check=False,
     )
     if commit.returncode == 0:
         sha = commit.stdout.strip().splitlines()[0] if commit.stdout else ""
@@ -135,6 +135,7 @@ def _branch_commits(branch: str, project_root: Path) -> list[str]:
         cwd=project_root,
         capture_output=True,
         text=True,
+        check=False,
     )
     return [l for l in result.stdout.splitlines() if l.strip()]
 
@@ -151,7 +152,7 @@ def _offer_merge(branch: str, project_root: Path, task: str = "") -> None:
 
     if not commits:
         print(f"\n[merge] Branch '{branch}' has no commits ahead of HEAD.")
-        print(f"[merge] The worker may not have committed. Branch preserved for manual inspection.")
+        print("[merge] The worker may not have committed. Branch preserved for manual inspection.")
         print(f"[merge]   git log HEAD..{branch}")
         return
 
@@ -170,6 +171,7 @@ def _offer_merge(branch: str, project_root: Path, task: str = "") -> None:
         cwd=project_root,
         capture_output=True,
         text=True,
+        check=False,
     )
     if squash.returncode != 0:
         print(f"[merge] Squash failed: {squash.stderr.strip()}")
@@ -186,9 +188,12 @@ def _offer_merge(branch: str, project_root: Path, task: str = "") -> None:
         cwd=project_root,
         capture_output=True,
         text=True,
+        check=False,
     )
     if commit.returncode == 0:
-        subprocess.run(["git", "branch", "-D", branch], cwd=project_root, capture_output=True)
+        subprocess.run(
+            ["git", "branch", "-D", branch], cwd=project_root, capture_output=True, check=False
+        )
         print(f"[merge] Done. Squashed into one commit; branch '{branch}' deleted.")
     else:
         print(f"[merge] Commit failed: {commit.stderr.strip()}")
@@ -239,7 +244,7 @@ def run_loop(task: str) -> int:
     if not approved:
         print("[loop] Plan rejected — exiting without changes.")
         _append_status(
-            f"\n## {date.today().isoformat()} — plan rejected\n"
+            f"\n## {datetime.now(tz=UTC).date().isoformat()} — plan rejected\n"
             f"Task: {task}\n"
             f"Plan written but not approved by human.\n"
         )
@@ -269,7 +274,7 @@ def run_loop(task: str) -> int:
                 f"Implement only this task — do not work ahead to other tasks.\n"
                 f"Follow all conventions in {agents_abs}.\n"
                 f"After completing, append a one-line summary of what you did to {status_abs} "
-                f"under today's date ({date.today().isoformat()})."
+                f"under today's date ({datetime.now(tz=UTC).date().isoformat()})."
             )
             worker_result = driver.run(
                 worker_prompt,

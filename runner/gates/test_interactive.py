@@ -1,7 +1,9 @@
 """Tests for InteractiveGate."""
 
+from typing import ClassVar
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import patch, call
 
 from runner.gates.interactive import InteractiveGate
 
@@ -13,7 +15,7 @@ def make_plan(tmp_path, content="# Plan\n\nDo the thing."):
 
 
 class TestInteractiveGateApprove:
-    CASES = [
+    CASES: ClassVar[list] = [
         pytest.param("y", True, id="y_approves"),
         pytest.param("n", False, id="n_rejects"),
         pytest.param("Y", True, id="uppercase_Y_approves"),

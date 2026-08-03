@@ -1,7 +1,7 @@
 import subprocess
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .base import SandboxRuntime, WorkspaceHandle
@@ -18,7 +18,7 @@ class GitWorktreeSandbox(SandboxRuntime):
 
     @contextmanager
     def workspace(self, project_root: Path):
-        branch = f"agent/{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        branch = f"agent/{datetime.now(tz=UTC).strftime('%Y%m%d-%H%M%S')}"
         worktree_path = Path(tempfile.mkdtemp(prefix="agent-worktree-"))
 
         subprocess.run(
@@ -36,12 +36,14 @@ class GitWorktreeSandbox(SandboxRuntime):
                 ["git", "worktree", "remove", "--force", str(worktree_path)],
                 cwd=project_root,
                 capture_output=True,
+                check=False,
             )
             if not handle._keep:
                 subprocess.run(
                     ["git", "branch", "-D", branch],
                     cwd=project_root,
                     capture_output=True,
+                    check=False,
                 )
             else:
                 print(f"[sandbox] Changes in branch '{branch}' — merge when ready.")

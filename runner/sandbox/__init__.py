@@ -5,10 +5,10 @@ from .noop import NoopSandbox
 from .worktree import GitWorktreeSandbox
 
 __all__ = [
+    "GitWorktreeSandbox",
+    "NoopSandbox",
     "SandboxRuntime",
     "WorkspaceHandle",
-    "NoopSandbox",
-    "GitWorktreeSandbox",
     "get_sandbox",
 ]
 

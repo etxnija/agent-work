@@ -1,4 +1,3 @@
-import re
 import subprocess
 from pathlib import Path
 
@@ -84,15 +83,17 @@ class ClaudeDriver(AgentDriver):
     def run(
         self,
         prompt: str,
-        context_files: list[str] = [],
+        context_files: list[str] | None = None,
         cwd: Path | None = None,
     ) -> AgentResult:
+        context_files = context_files or []
         full_prompt = _inject_context(prompt, context_files)
         result = subprocess.run(
             ["claude", "--print", "--dangerously-skip-permissions", full_prompt],
             capture_output=True,
             text=True,
             cwd=cwd,
+            check=False,
         )
         return AgentResult(text=result.stdout.strip(), exit_code=result.returncode)
 
@@ -132,5 +133,5 @@ class ClaudeDriver(AgentDriver):
         else:
             cmd = ["claude", "--print", "--dangerously-skip-permissions", full_prompt]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         return AgentResult(text=result.stdout.strip(), exit_code=result.returncode)

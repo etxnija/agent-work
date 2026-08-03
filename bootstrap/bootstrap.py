@@ -213,12 +213,12 @@ def bootstrap(project_dir: Path, lang: str) -> None:
         print(f"  created {agents_md.relative_to(project_dir)}")
 
     # memory/status.md
-    from datetime import date
+    from datetime import UTC, datetime
     status_md = project_dir / "memory" / "status.md"
     if not status_md.exists():
         status_md.write_text(
             STATUS_MD_TEMPLATE.format(
-                date=date.today().isoformat(),
+                date=datetime.now(tz=UTC).date().isoformat(),
                 lang=lang or "not specified",
             )
         )

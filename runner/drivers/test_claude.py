@@ -373,3 +373,38 @@ class TestClaudeDriverRunSubagent:
             result = ClaudeDriver().run_subagent("worker", "task")
 
         assert result.cost_usd == 0.0789
+
+    def test_passes_cwd_to_subprocess(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "worker.md").write_text("---\nname: worker\n---\nYou work.")
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        mock_result = MagicMock(
+            stdout=json.dumps({"result": "done", "total_cost_usd": 0.0}) + "\n",
+            returncode=0,
+        )
+        worktree = tmp_path / "worktree"
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            ClaudeDriver().run_subagent("worker", "task", cwd=worktree)
+
+        assert mock_run.call_args.kwargs["cwd"] == worktree
+
+    def test_no_cwd_defaults_to_none(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "worker.md").write_text("---\nname: worker\n---\nYou work.")
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        mock_result = MagicMock(
+            stdout=json.dumps({"result": "done", "total_cost_usd": 0.0}) + "\n",
+            returncode=0,
+        )
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            ClaudeDriver().run_subagent("worker", "task")
+
+        assert mock_run.call_args.kwargs["cwd"] is None

@@ -33,6 +33,11 @@ PLANNER_AGENT = "planner"
 PLAN_READY_SIGNAL = "PLAN READY"
 SENSOR_RETRY_LIMIT = 2
 
+REVIEWER_AGENT = "reviewer"
+REVIEW_APPROVED_SIGNAL = "REVIEW: APPROVED"
+REVIEW_CHANGES_SIGNAL = "REVIEW: CHANGES REQUESTED"
+REVIEW_RETRY_LIMIT = 2
+
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
 
@@ -64,8 +69,8 @@ class _MeteredDriver(AgentDriver):
         self._metrics.record(result)
         return result
 
-    def run_subagent(self, agent_name: str, prompt: str) -> AgentResult:
-        result = self._inner.run_subagent(agent_name, prompt)
+    def run_subagent(self, agent_name: str, prompt: str, cwd: Path | None = None) -> AgentResult:
+        result = self._inner.run_subagent(agent_name, prompt, cwd=cwd)
         self._metrics.record(result)
         return result
 
@@ -161,6 +166,85 @@ def _run_sensors(cwd: Path) -> list[tuple[str, str]]:
     return failures
 
 
+def _run_sensors_with_retry(
+    worktree: Path,
+    i: int,
+    total: int,
+    plan_abs: str,
+    agents_abs: str,
+    status_abs: str,
+    driver: AgentDriver,
+) -> list[tuple[str, str]]:
+    """
+    Run sensors, retrying up to SENSOR_RETRY_LIMIT times with a corrective
+    worker call in between. Returns the (possibly still non-empty) failures
+    list — does not decide fail-closed itself, that's the caller's job.
+    """
+    failures = _run_sensors(worktree)
+    attempt = 0
+    while failures and attempt < SENSOR_RETRY_LIMIT:
+        attempt += 1
+        print(
+            f"[sensor] Task {i}/{total}: "
+            f"{', '.join(name for name, _ in failures)} failed "
+            f"(attempt {attempt}/{SENSOR_RETRY_LIMIT})."
+        )
+        formatted_failures = "\n\n".join(
+            f"### {name}\n{output}" for name, output in failures
+        )
+        corrective_prompt = (
+            f"Your last change to this task produced these issues:\n\n"
+            f"{formatted_failures}\n\n"
+            f"Fix them and nothing else."
+        )
+        corrective_result = driver.run(
+            corrective_prompt,
+            context_files=[plan_abs, agents_abs, status_abs],
+            cwd=worktree,
+        )
+        if corrective_result.exit_code != 0:
+            print(
+                f"[error] Corrective worker call failed on task {i}/{total}:\n"
+                f"{corrective_result.text}"
+            )
+            break
+
+        failures = _run_sensors(worktree)
+
+    return failures
+
+
+def _task_diff(worktree: Path) -> str:
+    """
+    Capture the worktree's current uncommitted changes as a diff string.
+
+    Stages everything first (harmless pre-staging — _commit_task does its
+    own git add -A right before committing) so new/modified/deleted files
+    all show up, since sub-agents like the reviewer have no Bash and can't
+    run git diff themselves.
+    """
+    subprocess.run(["git", "add", "-A"], cwd=worktree, capture_output=True, check=False)
+    result = subprocess.run(
+        ["git", "diff", "--cached", "HEAD"],
+        cwd=worktree, capture_output=True, text=True, check=False,
+    )
+    return result.stdout
+
+
+def _review_verdict(text: str) -> tuple[bool, str]:
+    """
+    Parse the reviewer's marker-line output into (approved, critique).
+
+    Neither marker present is treated as changes-requested (fail toward
+    review, never silently approve on ambiguous output).
+    """
+    if REVIEW_APPROVED_SIGNAL in text:
+        return True, ""
+    if REVIEW_CHANGES_SIGNAL in text:
+        return False, text.split(REVIEW_CHANGES_SIGNAL, 1)[1].strip()
+    return False, text.strip()
+
+
 # ── Git helpers ──────────────────────────────────────────────────────────────
 
 def _commit_task(task_num: int, title: str, worktree: Path) -> None:
@@ -213,7 +297,7 @@ def _zellij_edit(path: str) -> None:
     )
 
 
-def _show_diff_in_editor(branch: str, project_root: Path) -> None:
+def _show_diff_in_editor(branch: str, project_root: Path, critiques: dict[int, str] | None = None) -> None:
     """
     Open the branch's full diff against HEAD in a floating editor pane, if
     running inside Zellij. A no-op everywhere else — this is a personal
@@ -232,14 +316,23 @@ def _show_diff_in_editor(branch: str, project_root: Path) -> None:
     if not diff.stdout.strip():
         return
 
+    content = diff.stdout
+    if critiques:
+        lines = ["# Outstanding review critiques", ""]
+        for task_num, critique in critiques.items():
+            lines.append(f"## Task {task_num}")
+            lines.append(critique)
+            lines.append("")
+        content = "\n".join(lines) + "\n" + content
+
     fd, path = tempfile.mkstemp(prefix="agent-diff-", suffix=".diff")
     with os.fdopen(fd, "w") as f:
-        f.write(diff.stdout)
+        f.write(content)
 
     _zellij_edit(path)
 
 
-def _offer_merge(branch: str, project_root: Path, task: str = "") -> None:
+def _offer_merge(branch: str, project_root: Path, task: str = "", critiques: dict[int, str] | None = None) -> None:
     """
     Show commits on branch and offer a squash-merge into HEAD.
 
@@ -259,7 +352,12 @@ def _offer_merge(branch: str, project_root: Path, task: str = "") -> None:
     for c in commits:
         print(f"  {c}")
 
-    _show_diff_in_editor(branch, project_root)
+    if critiques:
+        print("\n[review] Outstanding critiques from unresolved review cycles:")
+        for task_num, critique in critiques.items():
+            print(f"  Task {task_num}: {critique}")
+
+    _show_diff_in_editor(branch, project_root, critiques)
 
     answer = input("\n[merge] Squash-merge into current branch? (y/n) ").strip().lower()
     if answer != "y":
@@ -365,6 +463,8 @@ def run_loop(task: str) -> int:
     print(f"\n[loop] {len(tasks)} task(s) to implement.")
 
     # ── 4. Implement task by task (inside sandbox) ────────────────────────────
+    review_critiques: dict[int, str] = {}
+
     with sandbox.workspace(project_root) as handle:
         for i, task_text in enumerate(tasks, 1):
             print(f"\n[worker] Task {i}/{len(tasks)}: {_task_title(task_text)}")
@@ -395,21 +495,52 @@ def run_loop(task: str) -> int:
             if _file_hash(status_abs) == status_hash_before:
                 print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
 
-            failures = _run_sensors(handle.path)
-            attempt = 0
-            while failures and attempt < SENSOR_RETRY_LIMIT:
-                attempt += 1
+            failures = _run_sensors_with_retry(
+                handle.path, i, len(tasks), plan_abs, agents_abs, status_abs, driver
+            )
+
+            if failures:
                 print(
-                    f"[sensor] Task {i}/{len(tasks)}: "
-                    f"{', '.join(name for name, _ in failures)} failed "
-                    f"(attempt {attempt}/{SENSOR_RETRY_LIMIT})."
+                    f"[error] Sensors still failing on task {i}/{len(tasks)}: "
+                    f"{', '.join(name for name, _ in failures)}."
                 )
-                formatted_failures = "\n\n".join(
-                    f"### {name}\n{output}" for name, output in failures
+                print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
+                return 1  # handle._keep is False → sandbox discards the branch
+
+            # ── Adversarial review ──────────────────────────────────────────
+            review_attempt = 0
+            while True:
+                diff = _task_diff(handle.path)
+                review_prompt = (
+                    f"Review this task's diff against the task description and against "
+                    f"this repo's AGENTS.md conventions.\n\n"
+                    f"Task:\n{task_text}\n\n"
+                    f"Diff:\n```diff\n{diff}\n```"
+                )
+                review_result = driver.run_subagent(REVIEWER_AGENT, review_prompt, cwd=handle.path)
+                approved, critique = _review_verdict(review_result.text)
+
+                if approved:
+                    review_critiques.pop(i, None)
+                    break
+
+                if review_attempt >= REVIEW_RETRY_LIMIT:
+                    print(
+                        f"[review] Task {i}/{len(tasks)}: review budget exhausted "
+                        f"({REVIEW_RETRY_LIMIT}/{REVIEW_RETRY_LIMIT}) — committing with "
+                        f"outstanding critique."
+                    )
+                    review_critiques[i] = critique
+                    break
+
+                review_attempt += 1
+                print(
+                    f"[review] Task {i}/{len(tasks)}: changes requested "
+                    f"(attempt {review_attempt}/{REVIEW_RETRY_LIMIT})."
                 )
                 corrective_prompt = (
-                    f"Your last change to this task produced these issues:\n\n"
-                    f"{formatted_failures}\n\n"
+                    f"A reviewer requested changes to your last change for this task:\n\n"
+                    f"{critique}\n\n"
                     f"Fix them and nothing else."
                 )
                 corrective_result = driver.run(
@@ -422,18 +553,19 @@ def run_loop(task: str) -> int:
                         f"[error] Corrective worker call failed on task {i}/{len(tasks)}:\n"
                         f"{corrective_result.text}"
                     )
+                    review_critiques[i] = critique
                     break
 
-                failures = _run_sensors(handle.path)
-
-            if failures:
-                print(
-                    f"[error] Sensors still failing on task {i}/{len(tasks)} "
-                    f"after {attempt} attempt(s): "
-                    f"{', '.join(name for name, _ in failures)}."
+                failures = _run_sensors_with_retry(
+                    handle.path, i, len(tasks), plan_abs, agents_abs, status_abs, driver
                 )
-                print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
-                return 1  # handle._keep is False → sandbox discards the branch
+                if failures:
+                    print(
+                        f"[error] Sensors still failing on task {i}/{len(tasks)}: "
+                        f"{', '.join(name for name, _ in failures)}."
+                    )
+                    print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
+                    return 1  # handle._keep is False → sandbox discards the branch
 
             main_dirty_after = _main_checkout_dirty_paths(project_root, status_abs)
             leaked = sorted(set(main_dirty_after) - set(main_dirty_before))
@@ -454,7 +586,7 @@ def run_loop(task: str) -> int:
         handle.keep()  # all tasks complete → preserve the branch for merge
 
     if handle.branch:  # "" when NoopSandbox is active (tests / no-git projects)
-        _offer_merge(handle.branch, project_root, task)
+        _offer_merge(handle.branch, project_root, task, review_critiques)
 
     print(f"[metrics] Run total: {run_metrics.calls} driver call(s), ${run_metrics.cost_usd:.4f}")
     _append_status(

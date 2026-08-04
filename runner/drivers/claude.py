@@ -118,7 +118,12 @@ class ClaudeDriver(AgentDriver):
         text, cost_usd = _parse_result_json(result.stdout)
         return AgentResult(text=text, exit_code=result.returncode, cost_usd=cost_usd)
 
-    def run_subagent(self, agent_name: str, prompt: str) -> AgentResult:
+    def run_subagent(
+        self,
+        agent_name: str,
+        prompt: str,
+        cwd: Path | None = None,
+    ) -> AgentResult:
         """
         Load the agent definition from agents/<name>.md, compose its system prompt inline,
         and run via the Claude CLI.
@@ -159,6 +164,6 @@ class ClaudeDriver(AgentDriver):
                 full_prompt,
             ]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=False)
         text, cost_usd = _parse_result_json(result.stdout)
         return AgentResult(text=text, exit_code=result.returncode, cost_usd=cost_usd)

@@ -11,6 +11,10 @@ import pytest
 from runner.drivers.base import AgentResult
 from runner.loop import (
     PLAN_READY_SIGNAL,
+    REVIEW_APPROVED_SIGNAL,
+    REVIEW_CHANGES_SIGNAL,
+    REVIEW_RETRY_LIMIT,
+    REVIEWER_AGENT,
     SENSOR_RETRY_LIMIT,
     Metrics,
     _branch_commits,
@@ -19,8 +23,10 @@ from runner.loop import (
     _MeteredDriver,
     _offer_merge,
     _parse_tasks,
+    _review_verdict,
     _run_sensors,
     _show_diff_in_editor,
+    _task_diff,
     _task_title,
     run_loop,
 )
@@ -41,6 +47,13 @@ def _ok(text="") -> AgentResult:
 
 def _fail(text="error") -> AgentResult:
     return AgentResult(text=text, exit_code=1)
+
+
+def _plan_then_approve(agent_name, prompt, cwd=None) -> AgentResult:
+    """run_subagent side_effect: PLAN READY for the planner, approved for the reviewer."""
+    if agent_name == REVIEWER_AGENT:
+        return _ok(REVIEW_APPROVED_SIGNAL)
+    return _ok(PLAN_READY_SIGNAL)
 
 
 MINIMAL_PLAN = """\
@@ -135,7 +148,20 @@ class TestMeteredDriver:
 
         result = driver.run_subagent("planner", "prompt")
 
-        inner.run_subagent.assert_called_once_with("planner", "prompt")
+        inner.run_subagent.assert_called_once_with("planner", "prompt", cwd=None)
+        assert result == inner.run_subagent.return_value
+
+    def test_run_subagent_forwards_cwd(self):
+        inner = MagicMock()
+        inner.run_subagent.return_value = _ok("response")
+        metrics = Metrics()
+        driver = _MeteredDriver(inner, metrics)
+
+        result = driver.run_subagent("reviewer", "prompt", cwd=Path("/tmp"))
+
+        inner.run_subagent.assert_called_once_with(
+            "reviewer", "prompt", cwd=Path("/tmp")
+        )
         assert result == inner.run_subagent.return_value
 
     def test_run_records_call_and_cost_into_metrics(self):
@@ -380,7 +406,7 @@ class TestRunLoopPerTask:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run_subagent.side_effect = _plan_then_approve
 
         def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
@@ -404,7 +430,7 @@ class TestRunLoopPerTask:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run_subagent.side_effect = _plan_then_approve
 
         def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
@@ -477,7 +503,7 @@ class TestRunLoopPerTask:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run_subagent.side_effect = _plan_then_approve
 
         call_count = 0
 
@@ -523,7 +549,7 @@ class TestRunLoopSensorRetry:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run_subagent.side_effect = _plan_then_approve
         driver.run.side_effect = self._worker_ok(tmp_path)
         gate = MagicMock()
         gate.request.return_value = True
@@ -539,13 +565,13 @@ class TestRunLoopSensorRetry:
         assert code == 0
         assert driver.run.call_count == 1  # only the worker call, no corrective retry
         mock_commit.assert_called_once()
-        mock_print.assert_any_call("[metrics] Task 1/1: 1 driver call(s), $0.0000")
+        mock_print.assert_any_call("[metrics] Task 1/1: 2 driver call(s), $0.0000")  # worker + review approval
 
     def test_sensors_fail_once_then_pass_retries_and_commits(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run_subagent.side_effect = _plan_then_approve
         driver.run.side_effect = self._worker_ok(tmp_path)
         gate = MagicMock()
         gate.request.return_value = True
@@ -561,7 +587,7 @@ class TestRunLoopSensorRetry:
         assert code == 0
         assert driver.run.call_count == 2  # initial worker call + one corrective call
         mock_commit.assert_called_once()
-        mock_print.assert_any_call("[metrics] Task 1/1: 2 driver call(s), $0.0000")
+        mock_print.assert_any_call("[metrics] Task 1/1: 3 driver call(s), $0.0000")  # worker + corrective + review approval
 
     def test_sensors_fail_every_retry_fails_closed_without_commit(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
@@ -585,6 +611,145 @@ class TestRunLoopSensorRetry:
         mock_commit.assert_not_called()
 
 
+# ── Review-cycle wiring ───────────────────────────────────────────────────────
+
+class TestRunLoopReviewRetry:
+    def _setup(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(SINGLE_TASK_PLAN)
+
+    def _worker_ok(self, tmp_path):
+        def worker_side_effect(prompt, context_files, cwd=None):
+            status = tmp_path / "memory" / "status.md"
+            status.write_text(status.read_text() + "- done\n")
+            return _ok()
+        return worker_side_effect
+
+    def test_review_approves_first_try_commits_without_corrective(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = _plan_then_approve
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", return_value=[]), \
+             patch("runner.loop._commit_task") as mock_commit, \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert code == 0
+        assert driver.run_subagent.call_count == 2  # planner + one review call
+        assert driver.run.call_count == 1  # only the worker call, no corrective
+        mock_commit.assert_called_once()
+
+    def test_review_requests_changes_once_then_approves(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+
+        review_calls = 0
+
+        def run_subagent_side_effect(agent_name, prompt, cwd=None):
+            nonlocal review_calls
+            if agent_name == REVIEWER_AGENT:
+                review_calls += 1
+                if review_calls == 1:
+                    return _ok(f"{REVIEW_CHANGES_SIGNAL}\nRename `foo` to `bar` in baz.py:12.")
+                return _ok(REVIEW_APPROVED_SIGNAL)
+            return _ok(PLAN_READY_SIGNAL)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = run_subagent_side_effect
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", return_value=[]), \
+             patch("runner.loop._commit_task") as mock_commit, \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert code == 0
+        assert review_calls == 2
+        assert driver.run.call_count == 2  # worker + one review-corrective call
+        mock_commit.assert_called_once()
+
+    def test_review_requests_changes_every_retry_does_not_fail_closed(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._setup(tmp_path, monkeypatch)
+
+        def run_subagent_side_effect(agent_name, prompt, cwd=None):
+            if agent_name == REVIEWER_AGENT:
+                return _ok(f"{REVIEW_CHANGES_SIGNAL}\nStill not right.")
+            return _ok(PLAN_READY_SIGNAL)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = run_subagent_side_effect
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", return_value=[]), \
+             patch("runner.loop._commit_task") as mock_commit:
+            code = run_loop("task")
+
+        out = capsys.readouterr().out
+        # unlike a sensor failure, exhausting the review retry budget never
+        # fails closed — the task still commits with the critique recorded
+        assert code == 0
+        assert driver.run.call_count == 1 + REVIEW_RETRY_LIMIT  # worker + every review-corrective
+        mock_commit.assert_called_once()
+        assert "[review]" in out
+        assert "budget exhausted" in out  # outstanding critique recorded, not discarded
+
+    def test_sensor_regression_after_review_corrective_still_fails_closed(
+        self, tmp_path, monkeypatch
+    ):
+        self._setup(tmp_path, monkeypatch)
+
+        def run_subagent_side_effect(agent_name, prompt, cwd=None):
+            if agent_name == REVIEWER_AGENT:
+                return _ok(f"{REVIEW_CHANGES_SIGNAL}\nFix the thing.")
+            return _ok(PLAN_READY_SIGNAL)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = run_subagent_side_effect
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        sensors_call_count = 0
+
+        def sensors_side_effect(cwd):
+            nonlocal sensors_call_count
+            sensors_call_count += 1
+            if sensors_call_count == 1:
+                return []  # passes before the review cycle starts
+            return [("lint.sh", "regression")]  # fails on every post-corrective recheck
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", side_effect=sensors_side_effect), \
+             patch("runner.loop._commit_task") as mock_commit, \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert code == 1
+        mock_commit.assert_not_called()
+
+
 # ── Run-level metrics summary ────────────────────────────────────────────────
 
 class TestRunLoopMetricsSummary:
@@ -599,7 +764,7 @@ class TestRunLoopMetricsSummary:
             return _ok()
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run_subagent.side_effect = _plan_then_approve
         driver.run.side_effect = worker_side_effect
         gate = MagicMock()
         gate.request.return_value = True
@@ -616,13 +781,15 @@ class TestRunLoopMetricsSummary:
             code = run_loop("task")
 
         assert code == 0
-        # run total = planner (1 call) + task 1 (1 call, no retry) + task 2 (2 calls, one retry)
-        mock_print.assert_any_call("[metrics] Task 1/2: 1 driver call(s), $0.0000")
-        mock_print.assert_any_call("[metrics] Task 2/2: 2 driver call(s), $0.0000")
-        mock_print.assert_any_call("[metrics] Run total: 4 driver call(s), $0.0000")
+        # run total = planner (1 call)
+        #   + task 1 (worker + review approval, no sensor retry = 2 calls)
+        #   + task 2 (worker + corrective + review approval, one sensor retry = 3 calls)
+        mock_print.assert_any_call("[metrics] Task 1/2: 2 driver call(s), $0.0000")
+        mock_print.assert_any_call("[metrics] Task 2/2: 3 driver call(s), $0.0000")
+        mock_print.assert_any_call("[metrics] Run total: 6 driver call(s), $0.0000")
 
         status_text = (tmp_path / "memory" / "status.md").read_text()
-        assert "**Run metrics:** 4 driver call(s), $0.0000" in status_text
+        assert "**Run metrics:** 6 driver call(s), $0.0000" in status_text
 
 
 # ── Main-checkout leak detection ─────────────────────────────────────────────
@@ -820,6 +987,55 @@ class TestMainCheckoutDirtyPaths:
         (tmp_path / "memory" / "status.md").write_text("# Status\n- did task\n")
         (tmp_path / "leaked.py").write_text("# oops\n")
         assert _main_checkout_dirty_paths(tmp_path, status_abs) == ["leaked.py"]
+
+
+class TestTaskDiff:
+    def _init_repo(self, path: Path) -> None:
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+        (path / "tracked.txt").write_text("original\n")
+        subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"],
+                       cwd=path, check=True, capture_output=True, env=env)
+
+    def test_modified_tracked_file(self, tmp_path):
+        self._init_repo(tmp_path)
+        (tmp_path / "tracked.txt").write_text("changed\n")
+        diff = _task_diff(tmp_path)
+        assert "-original" in diff
+        assert "+changed" in diff
+
+    def test_new_untracked_file(self, tmp_path):
+        self._init_repo(tmp_path)
+        (tmp_path / "new.txt").write_text("hello\n")
+        diff = _task_diff(tmp_path)
+        assert "new.txt" in diff
+        assert "+hello" in diff
+
+    def test_no_changes_returns_empty_diff(self, tmp_path):
+        self._init_repo(tmp_path)
+        assert _task_diff(tmp_path) == ""
+
+
+# ── _review_verdict ──────────────────────────────────────────────────────────
+
+class TestReviewVerdict:
+    def test_approved(self):
+        approved, critique = _review_verdict(f"Looks good.\n{REVIEW_APPROVED_SIGNAL}")
+        assert approved is True
+        assert critique == ""
+
+    def test_changes_requested_with_critique(self):
+        text = f"{REVIEW_CHANGES_SIGNAL}\nRename `foo` to `bar` in baz.py:12."
+        approved, critique = _review_verdict(text)
+        assert approved is False
+        assert critique == "Rename `foo` to `bar` in baz.py:12."
+
+    def test_neither_marker_present_falls_back_to_changes_requested(self):
+        approved, critique = _review_verdict("  I'm not sure about this.  ")
+        assert approved is False
+        assert critique == "I'm not sure about this."
 
 
 class TestBranchCommits:

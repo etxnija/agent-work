@@ -122,11 +122,11 @@ visibility).
 
 | Item | Status |
 |---|---|
-| Reviewer sub-agent runs after sensors pass, before commit | pending |
-| Verdict signaled via a marker line (mirrors the planner's `PLAN READY` signal), not structured output | pending |
-| On disagreement: critique fed back to the worker as a corrective prompt, same shape as a sensor failure | pending |
-| `REVIEW_RETRY_LIMIT` (2) — unlike sensors, does **not** fail closed: commits anyway after the retry budget | pending |
-| Outstanding critique surfaced at the merge-diff review step (dovetails with the Zellij diff-preview pane) instead of discarding real work over a model disagreement | pending |
+| Reviewer sub-agent runs after sensors pass, before commit | ✅ |
+| Verdict signaled via a marker line (mirrors the planner's `PLAN READY` signal), not structured output | ✅ |
+| On disagreement: critique fed back to the worker as a corrective prompt, same shape as a sensor failure | ✅ |
+| `REVIEW_RETRY_LIMIT` (2) — unlike sensors, does **not** fail closed: commits anyway after the retry budget | ✅ |
+| Outstanding critique surfaced at the merge-diff review step (dovetails with the Zellij diff-preview pane) instead of discarding real work over a model disagreement | ✅ |
 
 ---
 

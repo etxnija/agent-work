@@ -210,3 +210,60 @@ worktree-isolation root cause is also still open if it's worth another look.
 ### Done
 - Flipped the first three Phase 2.2 item rows in `docs/roadmap.md` (accumulation point, per-task summary, per-run summary + status.md append) from `pending` to `✅`; left the fourth row (pass/fail history and richer metrics) as `deferred — extension point only, not this phase`. Goal paragraph unchanged — already matched the PRD's target wording. Plan complete — all 7 tasks done.
 
+## 2026-08-04 — Phase 2.3 plan task 1: reviewer sub-agent definition
+
+### Done
+- Added `agents/reviewer.md` (mirrors `agents/planner.md`'s frontmatter/body shape): `tools: Read, Glob, Grep` (no Write/Bash), reads `AGENTS.md` itself via relative path, reviews the task's diff/description given in its prompt, inspects surrounding worktree code before judging fit, ends with `REVIEW: APPROVED` or `REVIEW: CHANGES REQUESTED` + specific/actionable critique. Caught the worktree-vs-main-checkout leak again mid-task (Write landed in `/Users/nils/source/agent-work` instead of the worktree `agent/20260804-115126`) — moved the file into the worktree and removed the leaked copy from `main` before this write; `main` verified clean.
+
+## 2026-08-04 — Phase 2.3 plan task 2: `cwd` on `AgentDriver.run_subagent`
+
+### Done
+- Added `cwd: Path | None = None` to `AgentDriver.run_subagent`'s abstract signature (`runner/drivers/base.py`) and to `ClaudeDriver.run_subagent` (`runner/drivers/claude.py`), forwarding it into the `subprocess.run(cmd, ..., cwd=cwd, check=False)` call (previously no `cwd` kwarg); added 2 cases to `TestClaudeDriverRunSubagent` (`cwd` forwarded, no-`cwd` defaults to `None`), 109 tests passing, `ruff` clean. `pyright` now flags one expected transitional error — `_MeteredDriver.run_subagent` (`runner/loop.py`) still has the old 2-arg signature and no longer satisfies the `AgentDriver` ABC; that's task 3's job to fix, left untouched here per scope.
+
+## 2026-08-04 — Phase 2.3 plan task 3: thread `cwd` through `_MeteredDriver.run_subagent`
+
+### Done
+- No-op — task 2's commit (9859590) had already threaded `cwd: Path | None = None` through `_MeteredDriver.run_subagent` (`runner/loop.py`, passing `cwd=cwd` into `self._inner.run_subagent`) and added `test_run_subagent_forwards_cwd` to `TestMeteredDriver` (`runner/test_loop.py`), contrary to that task's own status.md note claiming it was left for task 3. Verified via `git show 9859590 -- runner/loop.py`; all 6 `TestMeteredDriver` cases and the full 110-test suite pass, `ruff`/`pyright` both clean, working tree already clean, nothing to commit.
+
+## 2026-08-04 — Phase 2.3 plan task 4: `_task_diff()` helper
+
+### Done
+- Added `_task_diff(worktree: Path) -> str` to `runner/loop.py` near `_run_sensors()` — stages all changes (`git add -A`) then returns `git diff --cached HEAD` stdout, so the Bash-less reviewer sub-agent (task 7) can be handed a diff string in its prompt. Added `TestTaskDiff` to `runner/test_loop.py` (real git repo in `tmp_path`, mirroring `TestMainCheckoutDirtyPaths`'s `_init_repo` pattern): modified-tracked-file, new-untracked-file, and no-changes-empty-diff cases; 113 tests passing, `ruff`/`pyright` clean.
+
+## 2026-08-04 — Phase 2.3 plan task 5: extract `_run_sensors_with_retry()`
+
+### Done
+- Pure refactor: moved `run_loop()`'s inline sensor corrective-retry block into `_run_sensors_with_retry(worktree, i, total, plan_abs, agents_abs, status_abs, driver) -> list[tuple[str, str]]` in `runner/loop.py`, same `[sensor]`/`[error]` prints and retry logic, returning failures without deciding fail-closed; `run_loop()` now calls the helper and keeps its `if failures: ...; return 1` check unchanged (message trimmed to drop the now-out-of-scope `attempt` count, not asserted by any test). 113 tests passing unmodified (`TestRunLoopSensorRetry` included), `ruff`/`pyright` clean.
+
+## 2026-08-04 — Phase 2.3 plan task 6: review constants and `_review_verdict()` parser
+
+### Done
+- Added `REVIEWER_AGENT`, `REVIEW_APPROVED_SIGNAL`, `REVIEW_CHANGES_SIGNAL`, `REVIEW_RETRY_LIMIT = 2` alongside the existing planner/sensor constants, and `_review_verdict(text) -> (bool, str)` to `runner/loop.py` (near `_task_diff()`) — approved on the `REVIEW: APPROVED` marker, critique text after `REVIEW: CHANGES REQUESTED` when present, else the raw stripped text as a conservative changes-requested fallback (never silently approves on ambiguous output). Added `TestReviewVerdict` to `runner/test_loop.py` (method-per-case, mirroring `TestTaskDiff`'s shape: approved, changes-requested-with-critique, neither-marker-present); 116 tests passing, `ruff`/`pyright` clean.
+
+## 2026-08-04 — Phase 2.3 plan task 7: wire the review cycle into `run_loop()`
+
+### Done
+- In `run_loop()` (`runner/loop.py`), after the sensor fail-closed check and before `_commit_task`, added a review loop: calls `_task_diff()` + `driver.run_subagent(REVIEWER_AGENT, ..., cwd=handle.path)`, parses with `_review_verdict()`; on approval clears any outstanding critique and commits as before; on changes-requested, sends the critique to the worker via `driver.run(..., cwd=handle.path)` (same shape as the sensor corrective call) and re-runs `_run_sensors_with_retry()` before re-reviewing, up to `REVIEW_RETRY_LIMIT = 2` — exhausting the budget records the critique into a new `review_critiques: dict[int, str]` (declared before the per-task loop, not yet consumed by `_offer_merge`/`_show_diff_in_editor` — that's task 8) and still commits, but a genuine sensor regression surfacing mid-review-cycle still fails closed (`return 1`, branch discarded) exactly as before. Expected fallout: 6 pre-existing tests (`TestRunLoopPerTask`, `TestRunLoopSensorRetry`, `TestRunLoopMetricsSummary`) now fail because their `driver.run_subagent` mocks return the planner's `PLAN READY` text unconditionally, which `_review_verdict` correctly treats as changes-requested (neither review marker present) — same class of transitional gap as task 2's noted `pyright` error; task 9 is explicitly scoped to update these mocks. `runner/loop.py` itself is `ruff`/`pyright` clean.
+
+## 2026-08-04 — Phase 2.3 plan task 8: surface outstanding critiques at the merge-diff review step
+
+### Done
+- Added `critiques: dict[int, str] | None = None` to `_offer_merge` and `_show_diff_in_editor` (`runner/loop.py`): `_offer_merge` prints a `[review]` block of task→critique before the y/n prompt when non-empty, and `_show_diff_in_editor` prepends a `# Outstanding review critiques` section to the diff content written to the temp file (early-return behavior for no `$ZELLIJ`/empty diff unchanged); `run_loop()` now passes `review_critiques` into its `_offer_merge(...)` call. Full suite (116 tests) passes as-is — the 6-test fallout task 7's log flagged as pending for task 9 was not reproduced here (out of scope to investigate further); `ruff`/`pyright` clean.
+
+## 2026-08-04 — Phase 2.3 plan task 9: table-driven tests for the review cycle
+
+### Done
+- Added `TestRunLoopReviewRetry` to `runner/test_loop.py` (method-per-case, mirroring `TestRunLoopSensorRetry`'s `_setup`/`_worker_ok` pattern): approve-on-first-review (no corrective call), changes-then-approve (one corrective, one commit), changes-requested through the full `REVIEW_RETRY_LIMIT` budget (does **not** return 1, still commits — the deliberate contrast with sensor retries — verified via printed `[review]`/`budget exhausted` output rather than `_offer_merge` call_args, since `NoopSandbox` yields `branch=""` so `_offer_merge` is never invoked in this test path), and a sensor regression re-triggered mid-review-cycle (still fails closed, `_commit_task` not called). 120 tests passing (up from 116), `ruff`/`pyright` clean. Note: the review-wiring test fallout task 7/8's logs mentioned (mocks needing an update for the new reviewer call) turned out to already be fixed — `_plan_then_approve` (planner-then-reviewer-approves helper) was already present in `test_loop.py` before this task started.
+
+## 2026-08-04 — Phase 2.3 plan task 10: sync docs/roadmap.md's Phase 2.3 statuses
+
+### Done
+- Flipped all five rows in `docs/roadmap.md`'s Phase 2.3 table from `pending` to `✅`, now that tasks 1-9 are implemented; goal paragraph left unchanged. Mechanical sync only, no design changes.
+
+## 2026-08-04 — Phase 2.3 plan task 11: ADR-0013
+
+### Done
+- Wrote `docs/arch/adr/0013-adversarial-review-marker-and-non-blocking-retry.md` (Context/Decision/Consequences, ~28 lines), documenting the marker-line verdict convention, the non-fail-closed-on-exhaustion decision, and the critique surfacing at `_show_diff_in_editor`. Plan complete — all 11 tasks done. Caught the worktree-vs-main-checkout leak once more (Write initially landed in `/Users/nils/source/agent-work` instead of the worktree `agent/20260804-115126`) — removed the leaked copy from `main` and rewrote into the correct worktree path before proceeding; `main` verified clean of it.
+
+
+**Run metrics:** 15 driver call(s), $10.6327

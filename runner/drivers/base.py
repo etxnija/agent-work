@@ -28,10 +28,15 @@ class AgentDriver(ABC):
         ...
 
     @abstractmethod
-    def run_subagent(self, agent_name: str, prompt: str) -> AgentResult:
+    def run_subagent(
+        self,
+        agent_name: str,
+        prompt: str,
+        cwd: Path | None = None,
+    ) -> AgentResult:
         """
         Invoke a named sub-agent definition (from agents/<name>.md).
         The driver is responsible for mapping agent_name to the tool's
-        sub-agent mechanism.
+        sub-agent mechanism. cwd sets the working directory for the agent process.
         """
         ...

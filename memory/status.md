@@ -295,5 +295,52 @@ worktree-isolation root cause is also still open if it's worth another look.
 ### Done
 - Amended `docs/roadmap.md`'s Phase 2.2 `cost_usd` accumulation-point row to note it was extended to `session_id` (latest-wins, not accumulated) via the same `Metrics`/`_MeteredDriver` point, since that row named the specific field `cost_usd` rather than using the section's general "cost/call visibility" wording — the other two rows (per-task/per-run summary) were already general enough to not need a change. Plan complete — all 5 tasks done. Caught the worktree-vs-main-checkout leak once more (Edit initially landed in `/Users/nils/source/agent-work` instead of the worktree `agent/20260804-124851`, since plan.md gives that absolute path) — reverted via `git checkout -- docs/roadmap.md` on `main` and reapplied the edit in the correct worktree path before finishing; `main` verified clean of it (memory/status.md diff there is the expected direct-to-project-root status write, not a leak).
 
+## 2026-08-04 — Phase 2.4 plan task 1: worker prompt SUMMARY: line + `_worker_summary()` parser
+
+### Done
+- Added a line to `worker_prompt` (`runner/loop.py`) instructing the worker to end its response with `SUMMARY: ` plus one sentence on what changed and why; added `_worker_summary(text) -> str` near `_review_verdict()` that returns `""` when no marker is present, else the first line after the last `SUMMARY:` occurrence — never gates the loop. Added `TestWorkerSummary` (present, absent, multi-line-trailing-text) to `runner/test_loop.py`; 126 tests passing, `ruff`/`pyright` clean; no leak into the main checkout (verified `git status` clean on both worktree `agent/20260804-131838` and `main`).
+
+## 2026-08-04 — Phase 2.4 plan task 2: reviewer reasoning on APPROVED
+
+### Done
+- Changed `agents/reviewer.md`'s `APPROVED` bullet to require one sentence of reasoning after the marker, noting (unlike the `CHANGES REQUESTED` critique) it's for the human record only and never fed back to the worker. Changed `_review_verdict()`'s approved branch (`runner/loop.py`) from `return True, ""` to `return True, text.split(REVIEW_APPROVED_SIGNAL, 1)[1].strip()`, mirroring the changes-requested branch. Added `test_approved_with_reasoning` to `TestReviewVerdict` (`runner/test_loop.py`); `test_approved`'s existing no-reasoning fixture unaffected. 127 tests passing, `ruff`/`pyright` clean; no leak into the main checkout (verified `git status` clean on both worktree `agent/20260804-131838` and main).
+
+## 2026-08-04 — Phase 2.4 plan task 3: `_run_sensors_with_retry()` also returns its retry-attempt count
+
+### Done
+- Changed `_run_sensors_with_retry()`'s return type (`runner/loop.py`) from `list[tuple[str, str]]` to `tuple[list[tuple[str, str]], int]`, returning `(failures, attempt)`; updated its docstring and both call sites in `run_loop()` to unpack the tuple, discarding the count with `_` (task 7 wires it into the narrative). Added `TestRunSensorsWithRetry` (`runner/test_loop.py`, real throwaway `.sh` scripts under `tmp_path`, mirroring `TestRunSensors`'s style): all-pass returns `([], 0)`, fail-once-then-pass (corrective `driver.run` rewrites the failing script) returns `([], 1)`, fail-through-budget returns `(failures, SENSOR_RETRY_LIMIT)`. 130 tests passing, `ruff`/`pyright` clean. Caught the worktree-vs-main-checkout leak once more at the very start (edits initially landed in `/Users/nils/source/agent-work` instead of the worktree `agent/20260804-131838`) — reverted via `git checkout -- runner/loop.py` on `main` and reapplied both edits in the correct worktree path before adding tests; `main` verified clean of it.
+
+## 2026-08-04 — Phase 2.4 plan task 4: `_build_narrative()` — pure markdown assembly
+
+### Done
+- Added `_build_narrative(task, task_narratives) -> str` near `_review_verdict()`/`_worker_summary()` in `runner/loop.py`: a `# Run narrative: {task}` heading followed by one `## Task N: {title}` section per entry (summary line with the empty-summary placeholder, a review line branching on `review_approved`, and an omit-when-zero retry note pluralizing "retry"/"retries" and "round"/"rounds"); pure function, no file I/O or outcome section (later tasks). Added `TestBuildNarrative` (`runner/test_loop.py`): empty list (heading only), single task with all fields populated, zero-retries (line omitted), empty summary (placeholder rendered). 134 tests passing, `ruff`/`pyright` clean; no leak into the main checkout (verified `git status`/`grep` clean on both worktree `agent/20260804-131838` and `main`).
+
+## 2026-08-04 — Phase 2.4 plan task 5: `_write_narrative()` helper + `.gitignore`
+
+### Done
+- Added `_write_narrative(project_root, run_timestamp, content) -> Path` near `_build_narrative()` in `runner/loop.py` — creates `project_root / "logs"` (`mkdir(exist_ok=True)`), writes `content` to `logs/run-{run_timestamp}.md`, returns the path; `run_loop()` itself left untouched (no `run_timestamp` variable exists until task 7). Added `logs/` to `.gitignore` alongside the existing `plan.md` entry. Added `TestWriteNarrative` (`runner/test_loop.py`): creates `logs/` when absent, writes expected content and returns expected path, second call with a different timestamp doesn't clobber the first file. 137 tests passing, `ruff`/`pyright` clean; no leak into the main checkout (verified `git status` clean on `main`, only the expected `memory/status.md` diff from task 4).
+
+## 2026-08-04 — Phase 2.4 plan task 6: `_offer_merge()` shows the narrative pane, returns an outcome string
+
+### Done
+- Added `narrative_path: Path | None = None` to `_offer_merge()` (`runner/loop.py`) — opens it via `_zellij_edit()` alongside the existing diff pane when set and `$ZELLIJ` is present; changed every `return` point to a short outcome string (`"no commits"`, `"squash failed"`, `"commit failed"`, `"declined"`, `"merged"`) instead of falling off the end. Added `_append_narrative_outcome(path, outcome)` near `_write_narrative()`, appending `## Outcome\n{outcome}\n` without truncating prior content. Extended `TestOfferMerge`'s three existing cases to assert the return value, added a case asserting `_zellij_edit` is called twice (diff path + narrative path) when both `narrative_path` and `$ZELLIJ` are set, and added `TestAppendNarrativeOutcome`. 139 tests passing, `ruff`/`pyright` clean; no leak into the main checkout (verified `git status` clean on `main`, only the expected `memory/status.md` diff).
 
 **Run metrics:** 11 driver call(s), $4.9868
+
+## 2026-08-04 — Phase 2.4 plan task 7: wire the narrative into `run_loop()`
+
+### Done
+- Wired the narrative pieces from tasks 1-6 into `run_loop()` (`runner/loop.py`): added an independent `run_timestamp` next to `project_root`, a `task_narratives` list next to `review_critiques`; per task, captured `worker_summary = _worker_summary(worker_result.text)` and accumulated `sensor_retry_count` across both `_run_sensors_with_retry()` call sites (post-worker and inside the review corrective loop), then appended one entry to `task_narratives` after the review `while` loop exits using `_task_title`, the final `approved`/`critique`, `sensor_retry_count`, and `review_attempt` as `review_retries`. After the sandbox `with` block, unconditionally built and wrote the narrative file (`_build_narrative` + `_write_narrative`) so it exists even under `NoopSandbox`; when `handle.branch` is truthy, passed `narrative_path` into `_offer_merge()` and appended its returned outcome via `_append_narrative_outcome()`. All 139 existing tests passed unmodified — no test asserted an exact/exhaustive `tmp_path` file listing that the new `logs/` directory would break, and both parsers already degrade to `""`/pass-through on absent markers, so no mock updates were needed; `ruff`/`pyright` clean. No leak into the main checkout (verified `git status` clean on both worktree `agent/20260804-131838` and `main`, aside from this expected status.md write).
+
+## 2026-08-04 — Phase 2.4 plan task 8: docs/roadmap.md Phase 2.4 section
+
+### Done
+- Inserted a `## Phase 2.4 — Run narrative` section into `docs/roadmap.md` between Phase 2.3's closing `---` and the `## Phase 3` heading, all five items flipped to ✅ per tasks 1-7 already being implemented; mechanical doc sync only, no design changes. No leak into the main checkout (verified `git status` clean on both worktree `agent/20260804-131838` and `main`, aside from this expected status.md write).
+
+## 2026-08-04 — Phase 2.4 plan task 9: ADR-0014
+
+### Done
+- Wrote `docs/arch/adr/0014-run-narrative-timestamp-and-two-phase-write.md` (Context/Decision/Consequences, ~30 lines), documenting the independent-timestamp-generation decision (uniform across sandbox backends, including branch-less `NoopSandbox`) and the two-phase content-then-outcome write, cross-referencing ADR-0013 and ADR-0012. Plan complete — all 9 tasks done. No leak into the main checkout (verified `git status` clean on both worktree `agent/20260804-131838` and `main`, aside from this expected status.md write).
+
+
+**Run metrics:** 23 driver call(s), $13.1695, session cc2940e9-6902-4ff4-a82c-78cbca59f4f5

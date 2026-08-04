@@ -177,11 +177,13 @@ def _run_sensors_with_retry(
     agents_abs: str,
     status_abs: str,
     driver: AgentDriver,
-) -> list[tuple[str, str]]:
+) -> tuple[list[tuple[str, str]], int]:
     """
     Run sensors, retrying up to SENSOR_RETRY_LIMIT times with a corrective
-    worker call in between. Returns the (possibly still non-empty) failures
-    list — does not decide fail-closed itself, that's the caller's job.
+    worker call in between. Returns (failures, attempt) — failures is the
+    (possibly still non-empty) failures list (does not decide fail-closed
+    itself, that's the caller's job); attempt is the number of retries used,
+    0 when sensors passed on the first try.
     """
     failures = _run_sensors(worktree)
     attempt = 0
@@ -214,7 +216,7 @@ def _run_sensors_with_retry(
 
         failures = _run_sensors(worktree)
 
-    return failures
+    return failures, attempt
 
 
 def _task_diff(worktree: Path) -> str:
@@ -242,10 +244,71 @@ def _review_verdict(text: str) -> tuple[bool, str]:
     review, never silently approve on ambiguous output).
     """
     if REVIEW_APPROVED_SIGNAL in text:
-        return True, ""
+        return True, text.split(REVIEW_APPROVED_SIGNAL, 1)[1].strip()
     if REVIEW_CHANGES_SIGNAL in text:
         return False, text.split(REVIEW_CHANGES_SIGNAL, 1)[1].strip()
     return False, text.strip()
+
+
+def _worker_summary(text: str) -> str:
+    """
+    Extract the worker's one-line SUMMARY: from its response text.
+
+    Absence just yields "" — unlike the PLAN_READY/REVIEW_* markers, this
+    never gates the loop.
+    """
+    if "SUMMARY:" not in text:
+        return ""
+    remainder = text.rsplit("SUMMARY:", 1)[1].strip()
+    return remainder.splitlines()[0] if remainder else ""
+
+
+def _build_narrative(task: str, task_narratives: list[dict]) -> str:
+    """
+    Assemble the run narrative markdown from per-task one-liners.
+
+    Pure formatting — no file I/O, no outcome section (appended separately
+    once the merge decision is known).
+    """
+    lines = [f"# Run narrative: {task}"]
+    for entry in task_narratives:
+        lines.append("")
+        lines.append(f"## Task {entry['num']}: {entry['title']}")
+        summary = entry["summary"] or "(worker did not provide a summary)"
+        lines.append(f"Summary: {summary}")
+        if entry["review_approved"]:
+            lines.append(f"Review: APPROVED — {entry['review_reasoning']}")
+        else:
+            lines.append(
+                f"Review: CHANGES REQUESTED (unresolved) — {entry['review_reasoning']}"
+            )
+        sensor_retries = entry["sensor_retries"]
+        review_retries = entry["review_retries"]
+        if sensor_retries or review_retries:
+            parts = []
+            if sensor_retries:
+                noun = "retry" if sensor_retries == 1 else "retries"
+                parts.append(f"{sensor_retries} sensor {noun}")
+            if review_retries:
+                noun = "round" if review_retries == 1 else "rounds"
+                parts.append(f"{review_retries} review {noun}")
+            lines.append(f"Retries: {', '.join(parts)}")
+    return "\n".join(lines) + "\n"
+
+
+def _write_narrative(project_root: Path, run_timestamp: str, content: str) -> Path:
+    """Write the assembled narrative markdown to logs/run-{run_timestamp}.md."""
+    logs_dir = project_root / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    path = logs_dir / f"run-{run_timestamp}.md"
+    path.write_text(content)
+    return path
+
+
+def _append_narrative_outcome(path: Path, outcome: str) -> None:
+    """Append the final merge outcome to an already-written narrative file."""
+    with path.open("a") as f:
+        f.write(f"\n## Outcome\n{outcome}\n")
 
 
 # ── Git helpers ──────────────────────────────────────────────────────────────
@@ -335,13 +398,21 @@ def _show_diff_in_editor(branch: str, project_root: Path, critiques: dict[int, s
     _zellij_edit(path)
 
 
-def _offer_merge(branch: str, project_root: Path, task: str = "", critiques: dict[int, str] | None = None) -> None:
+def _offer_merge(
+    branch: str,
+    project_root: Path,
+    task: str = "",
+    critiques: dict[int, str] | None = None,
+    narrative_path: Path | None = None,
+) -> str:
     """
     Show commits on branch and offer a squash-merge into HEAD.
 
     Squash merge: all task commits on the branch are collapsed into one commit
     on main, keeping the main history linear. The branch retains its per-task
     commits for traceability until it is deleted.
+
+    Returns a short outcome string describing what happened.
     """
     commits = _branch_commits(branch, project_root)
 
@@ -349,7 +420,7 @@ def _offer_merge(branch: str, project_root: Path, task: str = "", critiques: dic
         print(f"\n[merge] Branch '{branch}' has no commits ahead of HEAD.")
         print("[merge] The worker may not have committed. Branch preserved for manual inspection.")
         print(f"[merge]   git log HEAD..{branch}")
-        return
+        return "no commits"
 
     print(f"\n[merge] Branch '{branch}' — {len(commits)} commit(s) to squash into main:")
     for c in commits:
@@ -361,12 +432,14 @@ def _offer_merge(branch: str, project_root: Path, task: str = "", critiques: dic
             print(f"  Task {task_num}: {critique}")
 
     _show_diff_in_editor(branch, project_root, critiques)
+    if narrative_path is not None and "ZELLIJ" in os.environ:
+        _zellij_edit(str(narrative_path))
 
     answer = input("\n[merge] Squash-merge into current branch? (y/n) ").strip().lower()
     if answer != "y":
         print(f"[merge] Branch '{branch}' preserved. To squash-merge manually:")
         print(f"  git merge --squash {branch} && git commit && git branch -D {branch}")
-        return
+        return "declined"
 
     squash = subprocess.run(
         ["git", "merge", "--squash", branch],
@@ -378,7 +451,7 @@ def _offer_merge(branch: str, project_root: Path, task: str = "", critiques: dic
     if squash.returncode != 0:
         print(f"[merge] Squash failed: {squash.stderr.strip()}")
         print(f"[merge] Branch '{branch}' preserved.")
-        return
+        return "squash failed"
 
     # Build a single commit message: task as subject, per-task commits as body.
     subject = task.strip() or branch
@@ -397,9 +470,11 @@ def _offer_merge(branch: str, project_root: Path, task: str = "", critiques: dic
             ["git", "branch", "-D", branch], cwd=project_root, capture_output=True, check=False
         )
         print(f"[merge] Done. Squashed into one commit; branch '{branch}' deleted.")
-    else:
-        print(f"[merge] Commit failed: {commit.stderr.strip()}")
-        print(f"[merge] Branch '{branch}' preserved.")
+        return "merged"
+
+    print(f"[merge] Commit failed: {commit.stderr.strip()}")
+    print(f"[merge] Branch '{branch}' preserved.")
+    return "commit failed"
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -419,6 +494,7 @@ def run_loop(task: str) -> int:
     plan_abs = str(project_root / PLAN_FILE)
     agents_abs = str(project_root / AGENTS_MD)
     status_abs = str(project_root / STATUS_MD)
+    run_timestamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
 
     # ── 1. Plan ──────────────────────────────────────────────────────────────
     # Planner runs in the project root (read-only; no sandbox needed).
@@ -467,6 +543,7 @@ def run_loop(task: str) -> int:
 
     # ── 4. Implement task by task (inside sandbox) ────────────────────────────
     review_critiques: dict[int, str] = {}
+    task_narratives: list[dict] = []
 
     with sandbox.workspace(project_root) as handle:
         for i, task_text in enumerate(tasks, 1):
@@ -482,7 +559,9 @@ def run_loop(task: str) -> int:
                 f"Implement only this task — do not work ahead to other tasks.\n"
                 f"Follow all conventions in {agents_abs}.\n"
                 f"After completing, append a one-line summary of what you did to {status_abs} "
-                f"under today's date ({datetime.now(tz=UTC).date().isoformat()})."
+                f"under today's date ({datetime.now(tz=UTC).date().isoformat()}).\n"
+                f"End your response with a line starting with 'SUMMARY: ' followed by one "
+                f"sentence on what changed and why."
             )
             worker_result = driver.run(
                 worker_prompt,
@@ -495,12 +574,16 @@ def run_loop(task: str) -> int:
                 print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
                 return 1  # handle._keep is False → sandbox discards the branch
 
+            worker_summary = _worker_summary(worker_result.text)
+            sensor_retry_count = 0
+
             if _file_hash(status_abs) == status_hash_before:
                 print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
 
-            failures = _run_sensors_with_retry(
+            failures, attempt = _run_sensors_with_retry(
                 handle.path, i, len(tasks), plan_abs, agents_abs, status_abs, driver
             )
+            sensor_retry_count += attempt
 
             if failures:
                 print(
@@ -559,9 +642,10 @@ def run_loop(task: str) -> int:
                     review_critiques[i] = critique
                     break
 
-                failures = _run_sensors_with_retry(
+                failures, attempt = _run_sensors_with_retry(
                     handle.path, i, len(tasks), plan_abs, agents_abs, status_abs, driver
                 )
+                sensor_retry_count += attempt
                 if failures:
                     print(
                         f"[error] Sensors still failing on task {i}/{len(tasks)}: "
@@ -569,6 +653,18 @@ def run_loop(task: str) -> int:
                     )
                     print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
                     return 1  # handle._keep is False → sandbox discards the branch
+
+            task_narratives.append(
+                {
+                    "num": i,
+                    "title": _task_title(task_text),
+                    "summary": worker_summary,
+                    "review_approved": approved,
+                    "review_reasoning": critique,
+                    "sensor_retries": sensor_retry_count,
+                    "review_retries": review_attempt,
+                }
+            )
 
             main_dirty_after = _main_checkout_dirty_paths(project_root, status_abs)
             leaked = sorted(set(main_dirty_after) - set(main_dirty_before))
@@ -591,8 +687,14 @@ def run_loop(task: str) -> int:
 
         handle.keep()  # all tasks complete → preserve the branch for merge
 
+    narrative_content = _build_narrative(task, task_narratives)
+    narrative_path = _write_narrative(project_root, run_timestamp, narrative_content)
+
     if handle.branch:  # "" when NoopSandbox is active (tests / no-git projects)
-        _offer_merge(handle.branch, project_root, task, review_critiques)
+        outcome = _offer_merge(
+            handle.branch, project_root, task, review_critiques, narrative_path=narrative_path
+        )
+        _append_narrative_outcome(narrative_path, outcome)
 
     print(
         f"[metrics] Run total: {run_metrics.calls} driver call(s), "

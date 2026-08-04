@@ -130,6 +130,22 @@ visibility).
 
 ---
 
+## Phase 2.4 — Run narrative
+
+Goal: a short, human-readable summary of what happened during a run, for
+understanding the process rather than decision-gating. Built from one-liners
+agents already produce, not a new summarization call.
+
+| Item | Status |
+|---|---|
+| Worker prompt ends with a one-line SUMMARY: what changed and why | ✅ |
+| Reviewer always includes one line of reasoning alongside its verdict marker, not just on CHANGES REQUESTED | ✅ |
+| Per-run narrative assembled mechanically from captured one-liners: task, per-task summary + review verdict + retry notes, final outcome | ✅ |
+| Written to logs/run-<timestamp>.md, one file per run; logs/ added to .gitignore | ✅ |
+| Shown in a floating Zellij pane via _zellij_edit(), alongside the diff pane at merge time | ✅ |
+
+---
+
 ## Phase 3 — Feedback flywheel
 
 Goal: the loop learns across sessions and recovers from known failure modes without human intervention.

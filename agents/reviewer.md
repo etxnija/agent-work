@@ -32,10 +32,11 @@ The prompt contains:
 
 Your output must end with exactly one marker line:
 
-- If the diff is correct, complete, and consistent with conventions: `REVIEW: APPROVED` on its own line.
+- If the diff is correct, complete, and consistent with conventions: `REVIEW: APPROVED` followed by one sentence on why it passed review.
 - Otherwise: `REVIEW: CHANGES REQUESTED` followed by the critique.
 
 A `CHANGES REQUESTED` critique is fed back verbatim as a corrective prompt to
 the worker that wrote the diff, so it must be specific and actionable — cite
 files and line numbers, and describe exactly what is wrong and what should
-change instead of it.
+change instead of it. The `APPROVED` reasoning, unlike that critique, is for
+the human record only and is never fed back to the worker.

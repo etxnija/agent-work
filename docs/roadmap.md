@@ -61,6 +61,7 @@ Goal: plan size, diff size, and PR size are all bounded. Prerequisite for Phase 
 | Per-task status.md entry and hash check | ✅ |
 | Phase 2 sensor hook point per task (stub, wired in Phase 2) | ✅ |
 | Phase 3 git commit hook point per task (stub, wired in Phase 3) | ✅ |
+| **Fix: plan validation now runs before the approval gate** — `PLAN_READY_SIGNAL` presence and `_parse_tasks()` non-empty are checked with a `PLANNER_RETRY_LIMIT = 2` corrective-retry loop, matching the `SENSOR_RETRY_LIMIT`/`REVIEW_RETRY_LIMIT` pattern from Phase 2, before `gate.request()` is ever called — a human is never asked to approve a plan already known to be unusable. Gap found via independent architecture review. | ✅ |
 
 ---
 

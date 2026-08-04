@@ -344,3 +344,26 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 
 **Run metrics:** 23 driver call(s), $13.1695, session cc2940e9-6902-4ff4-a82c-78cbca59f4f5
+
+## 2026-08-04 — Plan-validation plan task 1: `PLANNER_RETRY_LIMIT` + `_plan_invalid_reason()`
+
+### Done
+- Added `PLANNER_RETRY_LIMIT = 2` next to `SENSOR_RETRY_LIMIT`/`REVIEW_RETRY_LIMIT`, and `_plan_invalid_reason(plan_text, plan_path) -> str | None` near `_parse_tasks()` in `runner/loop.py` — checks `PLAN_READY_SIGNAL` presence then `_parse_tasks()` non-empty, returning a specific reason string or `None`; not yet wired into `run_loop()` (task 2). 143 tests passing, `ruff`/`pyright` clean; no leak into the main checkout (verified `git status` clean on `main`).
+
+## 2026-08-04 — Plan-validation plan task 2: retry loop before the approval gate
+
+### Done
+- In `run_loop()` (`runner/loop.py`), replaced the "warn but continue" block with a corrective-retry loop: while `_plan_invalid_reason()` is non-`None` and under `PLANNER_RETRY_LIMIT`, prints a `[planner]` message naming the attempt and reason, re-runs `driver.run_subagent(PLANNER_AGENT, corrective_prompt)` (re-checking exit code and plan.md existence exactly as the initial call does), and re-evaluates; exhausting the budget still invalid prints `[error]` and `return 1` before `gate.request(PLAN_FILE)` is ever called, which now runs immediately after validation resolves. Post-gate `_parse_tasks` + empty-check left unmoved as defense-in-depth. As expected per plan.md, this breaks `TestRunLoopPlanReadySignalWarning` (asserts the now-removed warn-and-continue behavior — task 3's job to replace); `TestRunLoopNoTasks` and `TestRunLoopPlannerFailures` confirmed still passing unmodified. 145/146 tests passing, `ruff`/`pyright` clean; no leak into the main checkout (verified `git status` clean on `main`).
+
+## 2026-08-04 — Plan-validation plan task 3: retry-behavior tests
+
+### Done
+- Found that task 2's commit had already replaced `TestRunLoopPlanReadySignalWarning` with a `TestRunLoopPlannerRetry` class (needed to keep the suite green after moving validation before the gate) covering invalid-then-valid-on-retry, invalid-through-full-budget, and two extra fail-closed-mid-retry cases (nonzero exit, missing plan.md) — but it was missing the plan's baseline "valid on first try, no retry" case. Added `test_valid_plan_no_retry` to `TestRunLoopPlannerRetry` (`runner/test_loop.py`): `MINIMAL_PLAN` pre-written, `driver.run_subagent.return_value` fixed to `_ok(PLAN_READY_SIGNAL)`, `gate.request.return_value = False` (rejecting at the gate, matching `TestRunLoopGateRejection`'s pattern, so the reviewer sub-agent's own `run_subagent` calls per task never fire and don't inflate the call count) — asserts `driver.run_subagent.call_count == 1` and `gate.request.assert_called_once_with(PLAN_FILE)`. Confirmed `TestRunLoopNoTasks` still passes unmodified, as plan.md predicted. 150 tests passing, `ruff`/`pyright` clean; no leak into the main checkout (verified `git status` clean on `main`, only the expected `memory/status.md` diff).
+
+## 2026-08-04 — Plan-validation plan task 4: docs/roadmap.md Phase 1.2 note
+
+### Done
+- Added a note row to `docs/roadmap.md`'s Phase 1.2 table (matching the Phase 1.1 "Known gap" row's inline-note style): plan validation (`PLAN_READY_SIGNAL` presence + `_parse_tasks()` non-empty) now runs before `gate.request()` via a `PLANNER_RETRY_LIMIT = 2` corrective-retry loop matching the Phase 2 `SENSOR_RETRY_LIMIT`/`REVIEW_RETRY_LIMIT` pattern, closing a gap found via independent architecture review. Plan complete — all 4 tasks done. No leak into the main checkout (verified `git status` clean on `main`, only the expected `memory/status.md` diff).
+
+
+**Run metrics:** 14 driver call(s), $8.3115, session b86833a0-e7a0-434d-acae-f64ce669c1fa

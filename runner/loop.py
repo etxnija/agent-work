@@ -31,6 +31,7 @@ STATUS_MD = "memory/status.md"
 
 PLANNER_AGENT = "planner"
 PLAN_READY_SIGNAL = "PLAN READY"
+PLANNER_RETRY_LIMIT = 2
 SENSOR_RETRY_LIMIT = 2
 
 REVIEWER_AGENT = "reviewer"
@@ -119,6 +120,21 @@ def _parse_tasks(plan_path: str) -> list[str]:
         end = positions[i + 1] if i + 1 < len(positions) else len(section)
         tasks.append(section[pos:end].strip())
     return tasks
+
+
+def _plan_invalid_reason(plan_text: str, plan_path: str) -> str | None:
+    """
+    Name what's wrong with a planner-produced plan, or None if it's usable.
+
+    Covers only the two retryable conditions: a missing sign-off line and an
+    unparseable Tasks section. A crashed subprocess or an entirely-missing
+    plan.md are handled separately in run_loop() and are out of scope here.
+    """
+    if PLAN_READY_SIGNAL not in plan_text:
+        return f'missing the "{PLAN_READY_SIGNAL} — awaiting approval." line'
+    if not _parse_tasks(plan_path):
+        return "no parseable numbered ## Tasks section"
+    return None
 
 
 def _task_title(task_text: str) -> str:
@@ -515,9 +531,37 @@ def run_loop(task: str) -> int:
         print(f"[error] Planner did not write {PLAN_FILE}.\nPlanner output:\n{plan_result.text}")
         return 1
 
-    if PLAN_READY_SIGNAL not in plan_result.text:
-        print(f"[warning] Planner output did not contain '{PLAN_READY_SIGNAL}'.")
-        print(f"[warning] Planner output:\n{plan_result.text}\n")
+    attempt = 0
+    invalid_reason = _plan_invalid_reason(plan_result.text, PLAN_FILE)
+    while invalid_reason is not None and attempt < PLANNER_RETRY_LIMIT:
+        attempt += 1
+        print(f"[planner] Plan invalid (attempt {attempt}/{PLANNER_RETRY_LIMIT}): {invalid_reason}")
+
+        corrective_prompt = (
+            f"Task: {task}\n\n"
+            f"Your previous plan.md was invalid: {invalid_reason}\n\n"
+            f"Rewrite plan.md. It must end with the exact line "
+            f'"{PLAN_READY_SIGNAL} — awaiting approval." and must contain a '
+            "'## Tasks' section with a numbered list of tasks (e.g. '1. **title** — …')."
+        )
+        plan_result = driver.run_subagent(PLANNER_AGENT, corrective_prompt)
+
+        if plan_result.exit_code != 0:
+            print(f"[error] Planner exited with code {plan_result.exit_code}:\n{plan_result.text}")
+            return 1
+
+        if not plan_path.exists():
+            print(f"[error] Planner did not write {PLAN_FILE}.\nPlanner output:\n{plan_result.text}")
+            return 1
+
+        invalid_reason = _plan_invalid_reason(plan_result.text, PLAN_FILE)
+
+    if invalid_reason is not None:
+        print(
+            f"[error] Planner still produced an invalid plan after "
+            f"{PLANNER_RETRY_LIMIT} retries: {invalid_reason}"
+        )
+        return 1
 
     # ── 2. Approval gate ─────────────────────────────────────────────────────
     approved = gate.request(PLAN_FILE)

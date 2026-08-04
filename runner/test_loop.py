@@ -11,7 +11,9 @@ import pytest
 
 from runner.drivers.base import AgentResult
 from runner.loop import (
+    PLAN_FILE,
     PLAN_READY_SIGNAL,
+    PLANNER_RETRY_LIMIT,
     REVIEW_APPROVED_SIGNAL,
     REVIEW_CHANGES_SIGNAL,
     REVIEW_RETRY_LIMIT,
@@ -26,6 +28,7 @@ from runner.loop import (
     _MeteredDriver,
     _offer_merge,
     _parse_tasks,
+    _plan_invalid_reason,
     _review_verdict,
     _run_sensors,
     _run_sensors_with_retry,
@@ -291,6 +294,32 @@ class TestParseTasks:
         plan.write_text(MINIMAL_PLAN)
         for task in _parse_tasks(str(plan)):
             assert task == task.strip()
+
+
+# ── _plan_invalid_reason ─────────────────────────────────────────────────────
+
+class TestPlanInvalidReason:
+    def test_missing_signal_line(self, tmp_path):
+        plan = tmp_path / "plan.md"
+        plan.write_text(MINIMAL_PLAN)
+        reason = _plan_invalid_reason("No sign-off here.", str(plan))
+        assert reason == f'missing the "{PLAN_READY_SIGNAL} — awaiting approval." line'
+
+    def test_signal_present_but_no_parseable_tasks(self, tmp_path):
+        plan = tmp_path / "plan.md"
+        plan.write_text("# Plan\n\n## Context\nno tasks section\n")
+        reason = _plan_invalid_reason(
+            f"Done.\n{PLAN_READY_SIGNAL} — awaiting approval.", str(plan)
+        )
+        assert reason == "no parseable numbered ## Tasks section"
+
+    def test_valid_plan_returns_none(self, tmp_path):
+        plan = tmp_path / "plan.md"
+        plan.write_text(MINIMAL_PLAN)
+        reason = _plan_invalid_reason(
+            f"Done.\n{PLAN_READY_SIGNAL} — awaiting approval.", str(plan)
+        )
+        assert reason is None
 
 
 # ── _task_title ───────────────────────────────────────────────────────────────
@@ -1124,34 +1153,134 @@ class TestRunLoopStatusCheckPerTask:
         assert out.lower().count("warning") == 2  # one warning per task
 
 
-# ── PLAN_READY_SIGNAL warning ─────────────────────────────────────────────────
+# ── Planner retry loop ──────────────────────────────────────────────────────
 
-class TestRunLoopPlanReadySignalWarning:
-    def test_warns_but_continues_when_signal_missing(self, tmp_path, monkeypatch, capsys):
+class TestRunLoopPlannerRetry:
+    def test_valid_plan_no_retry(self, tmp_path, monkeypatch):
         _make_project(tmp_path)
         monkeypatch.chdir(tmp_path)
         (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok("no signal here")
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        gate = MagicMock()
+        # Reject at the gate so the run stops right after validation — the
+        # reviewer sub-agent (Phase 2.3) also calls run_subagent per task,
+        # which would otherwise inflate call_count beyond the single
+        # planner call this test is isolating.
+        gate.request.return_value = False
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("builtins.print"):
+            run_loop("task")
+
+        assert driver.run_subagent.call_count == 1
+        gate.request.assert_called_once_with(PLAN_FILE)
+
+    def test_valid_on_retry_reaches_gate(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text("# Plan\n\n## Context\nno tasks yet.\n")
+
+        planner_calls = {"n": 0}
+
+        def side_effect(agent_name, prompt, cwd=None):
+            if agent_name == REVIEWER_AGENT:
+                return _ok(REVIEW_APPROVED_SIGNAL)
+            planner_calls["n"] += 1
+            if planner_calls["n"] == 1:
+                return _ok("no signal here")
+            (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
+            return _ok(PLAN_READY_SIGNAL)
 
         def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
             status.write_text(status.read_text() + "- done\n")
             return _ok()
 
+        driver = MagicMock()
+        driver.run_subagent.side_effect = side_effect
         driver.run.side_effect = worker_side_effect
         gate = MagicMock()
         gate.request.return_value = True
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("builtins.print"):
             code = run_loop("task")
 
-        out = capsys.readouterr().out
-        assert "warning" in out.lower()
+        assert planner_calls["n"] == 2
+        gate.request.assert_called_once_with(PLAN_FILE)
         assert code == 0
+
+    def test_invalid_through_full_retry_budget_never_reaches_gate(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text("# Plan\n\n## Context\nno tasks ever.\n")
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok("no signal here")
+        gate = MagicMock()
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert driver.run_subagent.call_count == 1 + PLANNER_RETRY_LIMIT
+        gate.request.assert_not_called()
+        assert code == 1
+
+    def test_retry_attempt_nonzero_exit_fails_closed(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text("# Plan\n\n## Context\nno tasks yet.\n")
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = [_ok("no signal here"), _fail("crashed")]
+        gate = MagicMock()
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert driver.run_subagent.call_count == 2
+        gate.request.assert_not_called()
+        assert code == 1
+
+    def test_retry_attempt_missing_plan_file_fails_closed(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text("# Plan\n\n## Context\nno tasks yet.\n")
+
+        calls = {"n": 0}
+
+        def side_effect(agent_name, prompt, cwd=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _ok("no signal here")
+            (tmp_path / "plan.md").unlink()
+            return _ok("still no signal")
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = side_effect
+        gate = MagicMock()
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert driver.run_subagent.call_count == 2
+        gate.request.assert_not_called()
+        assert code == 1
 
 
 # ── _branch_commits / _offer_merge ────────────────────────────────────────────

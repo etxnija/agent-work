@@ -16,10 +16,12 @@ import os
 import re
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .drivers import get_driver
+from .drivers.base import AgentDriver, AgentResult
 from .gates import get_gate
 from .sandbox import get_sandbox
 
@@ -30,6 +32,42 @@ STATUS_MD = "memory/status.md"
 PLANNER_AGENT = "planner"
 PLAN_READY_SIGNAL = "PLAN READY"
 SENSOR_RETRY_LIMIT = 2
+
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+
+@dataclass
+class Metrics:
+    calls: int = 0
+    cost_usd: float = 0.0
+
+    def record(self, result: AgentResult) -> None:
+        self.calls += 1
+        if result.cost_usd is not None:
+            self.cost_usd += result.cost_usd
+
+
+class _MeteredDriver(AgentDriver):
+    """Wraps an AgentDriver, recording every call into a shared Metrics instance."""
+
+    def __init__(self, inner: AgentDriver, metrics: Metrics) -> None:
+        self._inner = inner
+        self._metrics = metrics
+
+    def run(
+        self,
+        prompt: str,
+        context_files: list[str] | None = None,
+        cwd: Path | None = None,
+    ) -> AgentResult:
+        result = self._inner.run(prompt, context_files=context_files, cwd=cwd)
+        self._metrics.record(result)
+        return result
+
+    def run_subagent(self, agent_name: str, prompt: str) -> AgentResult:
+        result = self._inner.run_subagent(agent_name, prompt)
+        self._metrics.record(result)
+        return result
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -271,6 +309,8 @@ def run_loop(task: str) -> int:
     Returns exit code (0 = success, 1 = error, 2 = rejected by human).
     """
     driver = get_driver()
+    run_metrics = Metrics()
+    driver = _MeteredDriver(driver, run_metrics)
     gate = get_gate()
     sandbox = get_sandbox()
 
@@ -329,6 +369,7 @@ def run_loop(task: str) -> int:
         for i, task_text in enumerate(tasks, 1):
             print(f"\n[worker] Task {i}/{len(tasks)}: {_task_title(task_text)}")
 
+            calls_before, cost_before = run_metrics.calls, run_metrics.cost_usd
             status_hash_before = _file_hash(status_abs)
             main_dirty_before = _main_checkout_dirty_paths(project_root, status_abs)
 
@@ -406,10 +447,19 @@ def run_loop(task: str) -> int:
 
             _commit_task(i, _task_title(task_text), handle.path)
 
+            task_calls = run_metrics.calls - calls_before
+            task_cost = run_metrics.cost_usd - cost_before
+            print(f"[metrics] Task {i}/{len(tasks)}: {task_calls} driver call(s), ${task_cost:.4f}")
+
         handle.keep()  # all tasks complete → preserve the branch for merge
 
     if handle.branch:  # "" when NoopSandbox is active (tests / no-git projects)
         _offer_merge(handle.branch, project_root, task)
+
+    print(f"[metrics] Run total: {run_metrics.calls} driver call(s), ${run_metrics.cost_usd:.4f}")
+    _append_status(
+        f"\n**Run metrics:** {run_metrics.calls} driver call(s), ${run_metrics.cost_usd:.4f}\n"
+    )
 
     print(f"\n[loop] All {len(tasks)} tasks complete.")
     return 0

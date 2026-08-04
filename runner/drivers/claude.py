@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 
@@ -57,6 +58,21 @@ def _load_agent_definition(name: str) -> tuple[str | None, list[str]]:
     return None, []
 
 
+def _parse_result_json(stdout: str) -> tuple[str, float | None]:
+    """
+    Parse `claude --print --output-format json` stdout into (text, cost_usd).
+    Falls back to (stdout.strip(), None) on invalid JSON or a non-dict payload,
+    so a malformed or empty response degrades instead of raising.
+    """
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        return stdout.strip(), None
+    if not isinstance(parsed, dict):
+        return stdout.strip(), None
+    return parsed.get("result", ""), parsed.get("total_cost_usd")
+
+
 def _inject_context(prompt: str, context_files: list[str]) -> str:
     """
     Prepend the contents of context_files into the prompt.
@@ -89,13 +105,18 @@ class ClaudeDriver(AgentDriver):
         context_files = context_files or []
         full_prompt = _inject_context(prompt, context_files)
         result = subprocess.run(
-            ["claude", "--print", "--dangerously-skip-permissions", full_prompt],
+            [
+                "claude", "--print", "--dangerously-skip-permissions",
+                "--output-format", "json",
+                full_prompt,
+            ],
             capture_output=True,
             text=True,
             cwd=cwd,
             check=False,
         )
-        return AgentResult(text=result.stdout.strip(), exit_code=result.returncode)
+        text, cost_usd = _parse_result_json(result.stdout)
+        return AgentResult(text=text, exit_code=result.returncode, cost_usd=cost_usd)
 
     def run_subagent(self, agent_name: str, prompt: str) -> AgentResult:
         """
@@ -128,10 +149,16 @@ class ClaudeDriver(AgentDriver):
                 "claude", "--print",
                 "--allowedTools", ",".join(tools),
                 "--dangerously-skip-permissions",
+                "--output-format", "json",
                 full_prompt,
             ]
         else:
-            cmd = ["claude", "--print", "--dangerously-skip-permissions", full_prompt]
+            cmd = [
+                "claude", "--print", "--dangerously-skip-permissions",
+                "--output-format", "json",
+                full_prompt,
+            ]
 
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        return AgentResult(text=result.stdout.strip(), exit_code=result.returncode)
+        text, cost_usd = _parse_result_json(result.stdout)
+        return AgentResult(text=text, exit_code=result.returncode, cost_usd=cost_usd)

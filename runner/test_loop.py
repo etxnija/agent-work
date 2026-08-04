@@ -12,9 +12,11 @@ from runner.drivers.base import AgentResult
 from runner.loop import (
     PLAN_READY_SIGNAL,
     SENSOR_RETRY_LIMIT,
+    Metrics,
     _branch_commits,
     _commit_task,
     _main_checkout_dirty_paths,
+    _MeteredDriver,
     _offer_merge,
     _parse_tasks,
     _run_sensors,
@@ -88,6 +90,86 @@ None.
 ## Out of scope
 Nothing.
 """
+
+
+# ── Metrics / _MeteredDriver ────────────────────────────────────────────────────
+
+class TestMetrics:
+    def test_record_increments_calls_and_adds_cost(self):
+        metrics = Metrics()
+
+        metrics.record(AgentResult(text="a", exit_code=0, cost_usd=0.01))
+        metrics.record(AgentResult(text="b", exit_code=0, cost_usd=0.02))
+
+        assert metrics.calls == 2
+        assert metrics.cost_usd == pytest.approx(0.03)
+
+    def test_record_with_none_cost_increments_calls_only(self):
+        metrics = Metrics()
+
+        metrics.record(AgentResult(text="a", exit_code=0, cost_usd=None))
+
+        assert metrics.calls == 1
+        assert metrics.cost_usd == 0.0
+
+
+class TestMeteredDriver:
+    def test_run_delegates_args_and_return_value(self):
+        inner = MagicMock()
+        inner.run.return_value = _ok("response")
+        metrics = Metrics()
+        driver = _MeteredDriver(inner, metrics)
+
+        result = driver.run("prompt", context_files=["a.md"], cwd=Path("/tmp"))
+
+        inner.run.assert_called_once_with(
+            "prompt", context_files=["a.md"], cwd=Path("/tmp")
+        )
+        assert result == inner.run.return_value
+
+    def test_run_subagent_delegates_args_and_return_value(self):
+        inner = MagicMock()
+        inner.run_subagent.return_value = _ok("response")
+        metrics = Metrics()
+        driver = _MeteredDriver(inner, metrics)
+
+        result = driver.run_subagent("planner", "prompt")
+
+        inner.run_subagent.assert_called_once_with("planner", "prompt")
+        assert result == inner.run_subagent.return_value
+
+    def test_run_records_call_and_cost_into_metrics(self):
+        inner = MagicMock()
+        inner.run.return_value = AgentResult(text="x", exit_code=0, cost_usd=0.05)
+        metrics = Metrics()
+        driver = _MeteredDriver(inner, metrics)
+
+        driver.run("prompt")
+
+        assert metrics.calls == 1
+        assert metrics.cost_usd == pytest.approx(0.05)
+
+    def test_run_subagent_records_call_and_cost_into_metrics(self):
+        inner = MagicMock()
+        inner.run_subagent.return_value = AgentResult(text="x", exit_code=0, cost_usd=0.05)
+        metrics = Metrics()
+        driver = _MeteredDriver(inner, metrics)
+
+        driver.run_subagent("planner", "prompt")
+
+        assert metrics.calls == 1
+        assert metrics.cost_usd == pytest.approx(0.05)
+
+    def test_run_with_none_cost_increments_calls_without_touching_cost(self):
+        inner = MagicMock()
+        inner.run.return_value = _ok("response")
+        metrics = Metrics()
+        driver = _MeteredDriver(inner, metrics)
+
+        driver.run("prompt")
+
+        assert metrics.calls == 1
+        assert metrics.cost_usd == 0.0
 
 
 # ── _parse_tasks ──────────────────────────────────────────────────────────────
@@ -451,12 +533,13 @@ class TestRunLoopSensorRetry:
              patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("runner.loop._run_sensors", return_value=[]), \
              patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print"):
+             patch("builtins.print") as mock_print:
             code = run_loop("task")
 
         assert code == 0
         assert driver.run.call_count == 1  # only the worker call, no corrective retry
         mock_commit.assert_called_once()
+        mock_print.assert_any_call("[metrics] Task 1/1: 1 driver call(s), $0.0000")
 
     def test_sensors_fail_once_then_pass_retries_and_commits(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
@@ -472,12 +555,13 @@ class TestRunLoopSensorRetry:
              patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("runner.loop._run_sensors", side_effect=[[("lint.sh", "bad")], []]), \
              patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print"):
+             patch("builtins.print") as mock_print:
             code = run_loop("task")
 
         assert code == 0
         assert driver.run.call_count == 2  # initial worker call + one corrective call
         mock_commit.assert_called_once()
+        mock_print.assert_any_call("[metrics] Task 1/1: 2 driver call(s), $0.0000")
 
     def test_sensors_fail_every_retry_fails_closed_without_commit(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
@@ -499,6 +583,46 @@ class TestRunLoopSensorRetry:
         assert code == 1
         assert driver.run.call_count == 1 + SENSOR_RETRY_LIMIT  # worker + every corrective retry
         mock_commit.assert_not_called()
+
+
+# ── Run-level metrics summary ────────────────────────────────────────────────
+
+class TestRunLoopMetricsSummary:
+    def test_run_total_printed_and_appended_to_status(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
+
+        def worker_side_effect(prompt, context_files, cwd=None):
+            status = tmp_path / "memory" / "status.md"
+            status.write_text(status.read_text() + "- done\n")
+            return _ok()
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run.side_effect = worker_side_effect
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch(
+                 "runner.loop._run_sensors",
+                 side_effect=[[], [("lint.sh", "bad")], []],
+             ), \
+             patch("runner.loop._commit_task"), \
+             patch("builtins.print") as mock_print:
+            code = run_loop("task")
+
+        assert code == 0
+        # run total = planner (1 call) + task 1 (1 call, no retry) + task 2 (2 calls, one retry)
+        mock_print.assert_any_call("[metrics] Task 1/2: 1 driver call(s), $0.0000")
+        mock_print.assert_any_call("[metrics] Task 2/2: 2 driver call(s), $0.0000")
+        mock_print.assert_any_call("[metrics] Run total: 4 driver call(s), $0.0000")
+
+        status_text = (tmp_path / "memory" / "status.md").read_text()
+        assert "**Run metrics:** 4 driver call(s), $0.0000" in status_text
 
 
 # ── Main-checkout leak detection ─────────────────────────────────────────────

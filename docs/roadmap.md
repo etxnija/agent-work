@@ -104,10 +104,10 @@ that shouldn't land without cost visibility.
 
 | Item | Status |
 |---|---|
-| Track `AgentResult.cost_usd` per driver call (field already exists, unused — see Phase 2 plan's "Out of scope") | pending |
-| Aggregate cost + call count per task | pending |
-| Print a per-run summary (total cost, total calls) at the end of `agent loop` | pending |
-| Accumulation point designed so retry counts / wall-clock time are small additions later | pending |
+| Track `AgentResult.cost_usd` per driver call, routed through one accumulation point in loop.py | ✅ |
+| Print a per-task metrics summary | ✅ |
+| Print a per-run summary and append it to `memory/status.md` | ✅ |
+| Pass/fail history and richer metrics (retry counts, wall-clock time) | deferred — extension point only, not this phase |
 
 ---
 

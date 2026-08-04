@@ -175,3 +175,38 @@ worktree-isolation root cause is also still open if it's worth another look.
 - Synced `docs/roadmap.md` to match (mechanical sync, no new design decisions — those were already made in the PRD): added Phase 2.2 (Metrics) and Phase 2.3 (Adversarial review) sections with the design details from the PRD changelog (marker-line verdict mirroring `PLAN READY`, runs after sensors, does not fail closed, critique surfaces at the merge-diff review step — dovetails with yesterday's Zellij diff-preview pane). Removed the now-redundant "Metrics" row from Phase 2's table and the "Adversarial review" row from Phase 4's table; updated Phase 4's goal sentence to drop the stale mention.
 - Also noted while reading the PRD: `External memory.md` (linked solution-outline note) has been updated independently with a resolved root-cause finding on yesterday's memory-index thread — `autoMemoryDirectory` is user/policy-scope only per Claude Code's docs, so the `.claude/settings.local.json` fix we were circling never would have worked; correct fix is the global `~/.claude/settings.json`. Not acted on, just noted for later.
 
+## 2026-08-04 — Phase 2.2 plan task 1: JSON-result parser
+
+### Done
+- Added `_parse_result_json(stdout) -> (text, cost_usd)` to `runner/drivers/claude.py`, parsing `claude --output-format json` stdout and falling back to `(stdout.strip(), None)` on invalid JSON or a non-dict payload; not yet wired into `run`/`run_subagent` (task 2). Added 4 table-driven cases to `test_claude.py` (numeric cost, null cost, invalid JSON, empty string); 97 tests passing, `ruff`/`pyright` clean. Caught and reverted a misdirected edit to the main checkout (`/Users/nils/source/agent-work`, branch `main`) made before switching to the correct worktree (`agent/20260804-110902`) — same leak class noted on 2026-08-03; no change landed on `main`.
+
+## 2026-08-04 — Phase 2.2 plan task 2: wire `--output-format json` into ClaudeDriver
+
+### Done
+- Appended `"--output-format", "json"` to the subprocess arg lists in both `ClaudeDriver.run()` and `ClaudeDriver.run_subagent()` (`runner/drivers/claude.py`), and replaced their `AgentResult(text=result.stdout.strip(), ...)` construction with `_parse_result_json(result.stdout)` feeding `text`/`cost_usd`. Updated the mocked-stdout fixtures in `TestClaudeDriverRun` and `TestClaudeDriverRunSubagent` (`test_claude.py`) to JSON strings, added `--output-format`/`json` to every `expected_args`/cmd assertion, and added one new case per method asserting `result.cost_usd` is populated from the mocked JSON; 99 tests passing, `ruff`/`pyright` clean. Caught the same worktree-vs-main-checkout mix-up again at the very start (Read tool followed the plan.md-given absolute path into `/Users/nils/source/agent-work` rather than the actual worktree) — this time caught before any Edit landed, by diffing `claude.py` between the two paths and finding the main checkout missing task 1's `_parse_result_json`; all edits this task went into the worktree (`agent/20260804-110902`) only, `main` still shows only the pre-existing `memory/status.md` diff.
+
+## 2026-08-04 — Phase 2.2 plan task 3: `Metrics` + `_MeteredDriver`
+
+### Done
+- Added `Metrics` (`calls`, `cost_usd`, `record(result)`) and `_MeteredDriver(AgentDriver)` (wraps an inner driver, records every `run`/`run_subagent` result into a shared `Metrics`, returns the inner result unchanged) to `runner/loop.py`, importing `AgentDriver`/`AgentResult` from `.drivers.base` only — not yet wired into `run_loop()` (task 4). Added `TestMetrics`/`TestMeteredDriver` to `test_loop.py` (delegation of args/return value, call+cost accumulation, `cost_usd=None` leaving cost untouched); 106 tests passing, `ruff`/`pyright` clean.
+
+## 2026-08-04 — Phase 2.2 plan task 4: wrap the driver in run_loop() and print per-task metrics
+
+### Done
+- In `run_loop()` (`runner/loop.py`), rebound `driver = _MeteredDriver(driver, run_metrics)` right after `get_driver()` so the planner/worker/corrective calls are metered automatically; snapshotted `calls_before, cost_before` at the top of each per-task loop iteration and printed `[metrics] Task i/N: {calls} driver call(s), ${cost:.4f}` right after `_commit_task(...)`. Extended the two passing-path cases in `TestRunLoopSensorRetry` (`test_loop.py`) to assert the exact printed metrics line — 1 call for the no-retry case, 2 for the one-retry case (reused the existing `driver.run.side_effect` fixtures, no new test classes needed); 106 tests passing, `ruff`/`pyright` clean.
+
+## 2026-08-04 — Phase 2.2 plan task 5: run-level metrics summary
+
+### Done
+- In `run_loop()` (`runner/loop.py`), right before the final `[loop] All N tasks complete.` print/`return 0`, added `print(f"[metrics] Run total: {run_metrics.calls} driver call(s), ${run_metrics.cost_usd:.4f}")` and a matching `_append_status(...)` call so the run total also lands in `memory/status.md`. Added `TestRunLoopMetricsSummary` (`test_loop.py`) covering a two-task run (one task with no retry, one with a retry) and asserting both the printed run-total line and the status.md append — note the run total (4 calls: planner + 1 + 2) is *not* simply the sum of the two per-task numbers, since the planner's `run_subagent` call is metered too and isn't attributed to any task; 107 tests passing, `ruff`/`pyright` clean.
+
+## 2026-08-04 — Phase 2.2 plan task 6: ADR for metered-driver wrapper
+
+### Done
+- Wrote `docs/arch/adr/0012-metrics-metered-driver-wrapper.md` (Context / Decision / Consequences, ~30 lines) documenting the `_MeteredDriver` wrap-at-`get_driver()` decision, the per-task before/after `Metrics` snapshot rationale (single-threaded/sequential loop), and that it's deliberately not a fourth `AGENT_TOOL` backend.
+
+## 2026-08-04 — Phase 2.2 plan task 7: sync docs/roadmap.md's Phase 2.2 section
+
+### Done
+- Flipped the first three Phase 2.2 item rows in `docs/roadmap.md` (accumulation point, per-task summary, per-run summary + status.md append) from `pending` to `✅`; left the fourth row (pass/fail history and richer metrics) as `deferred — extension point only, not this phase`. Goal paragraph unchanged — already matched the PRD's target wording. Plan complete — all 7 tasks done.
+

@@ -1,5 +1,6 @@
 """Tests for ClaudeDriver and its helpers."""
 
+import json
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,7 @@ from runner.drivers.claude import (
     _load_agent_body,
     _load_agent_definition,
     _parse_frontmatter,
+    _parse_result_json,
 )
 
 # ── _parse_frontmatter ────────────────────────────────────────────────────────
@@ -121,6 +123,37 @@ class TestLoadAgentDefinition:
         assert tools == []
 
 
+# ── _parse_result_json ────────────────────────────────────────────────────────
+
+class TestParseResultJson:
+    CASES: ClassVar[list] = [
+        pytest.param(
+            '{"result": "response text", "total_cost_usd": 0.0123}',
+            ("response text", 0.0123),
+            id="numeric_total_cost_usd",
+        ),
+        pytest.param(
+            '{"result": "response text", "total_cost_usd": null}',
+            ("response text", None),
+            id="null_total_cost_usd",
+        ),
+        pytest.param(
+            "not valid json",
+            ("not valid json", None),
+            id="invalid_json_falls_back_to_stripped_stdout",
+        ),
+        pytest.param(
+            "",
+            ("", None),
+            id="empty_string_falls_back_to_stripped_stdout",
+        ),
+    ]
+
+    @pytest.mark.parametrize("stdout,expected", CASES)
+    def test_parse(self, stdout, expected):
+        assert _parse_result_json(stdout) == expected
+
+
 # ── _inject_context ───────────────────────────────────────────────────────────
 
 class TestInjectContext:
@@ -159,24 +192,54 @@ class TestClaudeDriverRun:
             "hello",
             [],
             None,
-            ["claude", "--print", "--dangerously-skip-permissions", "hello"],
+            [
+                "claude", "--print", "--dangerously-skip-permissions",
+                "--output-format", "json", "hello",
+            ],
+            json.dumps({"result": "response text", "total_cost_usd": 0.01}),
             "response text",
             0,
+            0.01,
             id="simple_prompt_no_context",
         ),
         pytest.param(
             "do something",
             [],
             None,
-            ["claude", "--print", "--dangerously-skip-permissions", "do something"],
+            [
+                "claude", "--print", "--dangerously-skip-permissions",
+                "--output-format", "json", "do something",
+            ],
+            json.dumps({"result": "", "total_cost_usd": None}),
             "",
             1,
+            None,
             id="non_zero_exit_code_propagated",
+        ),
+        pytest.param(
+            "another prompt",
+            [],
+            None,
+            [
+                "claude", "--print", "--dangerously-skip-permissions",
+                "--output-format", "json", "another prompt",
+            ],
+            json.dumps({"result": "another response", "total_cost_usd": 0.0567}),
+            "another response",
+            0,
+            0.0567,
+            id="cost_usd_populated_from_json",
         ),
     ]
 
-    @pytest.mark.parametrize("prompt,context_files,cwd,expected_args,stdout,returncode", CASES)
-    def test_run(self, prompt, context_files, cwd, expected_args, stdout, returncode):
+    @pytest.mark.parametrize(
+        "prompt,context_files,cwd,expected_args,stdout,expected_text,returncode,expected_cost",
+        CASES,
+    )
+    def test_run(
+        self, prompt, context_files, cwd, expected_args, stdout, expected_text, returncode,
+        expected_cost,
+    ):
         mock_result = MagicMock()
         mock_result.stdout = stdout + "\n"
         mock_result.returncode = returncode
@@ -187,8 +250,9 @@ class TestClaudeDriverRun:
         mock_run.assert_called_once_with(
             expected_args, capture_output=True, text=True, cwd=cwd, check=False
         )
-        assert result.text == stdout
+        assert result.text == expected_text
         assert result.exit_code == returncode
+        assert result.cost_usd == expected_cost
 
     def test_run_injects_context_files(self, tmp_path):
         ctx = tmp_path / "ctx.md"
@@ -223,7 +287,10 @@ class TestClaudeDriverRunSubagent:
         import runner.drivers.claude as mod
         monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
 
-        mock_result = MagicMock(stdout="plan written\n", returncode=0)
+        mock_result = MagicMock(
+            stdout=json.dumps({"result": "plan written", "total_cost_usd": 0.03}) + "\n",
+            returncode=0,
+        )
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             result = ClaudeDriver().run_subagent("planner", "explore")
 
@@ -233,9 +300,12 @@ class TestClaudeDriverRunSubagent:
         # Both flags required: --allowedTools restricts tool set, --dangerously-skip-permissions
         # suppresses prompts so unattended Write calls don't hang the loop.
         assert "--dangerously-skip-permissions" in cmd
+        assert "--output-format" in cmd
+        assert "json" in cmd
         assert "You are the planner." in cmd[-1]
         assert "explore" in cmd[-1]
         assert result.text == "plan written"
+        assert result.cost_usd == 0.03
 
     def test_uses_dangerously_skip_when_no_tools_declared(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "agents"
@@ -245,13 +315,18 @@ class TestClaudeDriverRunSubagent:
         import runner.drivers.claude as mod
         monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
 
-        mock_result = MagicMock(stdout="done\n", returncode=0)
+        mock_result = MagicMock(
+            stdout=json.dumps({"result": "done", "total_cost_usd": 0.005}) + "\n",
+            returncode=0,
+        )
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             ClaudeDriver().run_subagent("worker", "task")
 
         cmd = mock_run.call_args[0][0]
         assert "--dangerously-skip-permissions" in cmd
         assert "--allowedTools" not in cmd
+        assert "--output-format" in cmd
+        assert "json" in cmd
 
     def test_composes_agent_body_into_prompt(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "agents"
@@ -261,7 +336,10 @@ class TestClaudeDriverRunSubagent:
         import runner.drivers.claude as mod
         monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
 
-        mock_result = MagicMock(stdout="plan written\n", returncode=0)
+        mock_result = MagicMock(
+            stdout=json.dumps({"result": "plan written", "total_cost_usd": 0.01}) + "\n",
+            returncode=0,
+        )
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             result = ClaudeDriver().run_subagent("planner", "explore the codebase")
 
@@ -278,3 +356,20 @@ class TestClaudeDriverRunSubagent:
 
         assert result.exit_code == 1
         assert "missing" in result.text
+
+    def test_populates_cost_usd_from_json(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "worker.md").write_text("---\nname: worker\n---\nYou work.")
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        mock_result = MagicMock(
+            stdout=json.dumps({"result": "done", "total_cost_usd": 0.0789}) + "\n",
+            returncode=0,
+        )
+        with patch("subprocess.run", return_value=mock_result):
+            result = ClaudeDriver().run_subagent("worker", "task")
+
+        assert result.cost_usd == 0.0789

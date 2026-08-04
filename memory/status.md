@@ -161,3 +161,10 @@ three tracked gaps (keep-branch-on-failure, `agent loop --resume`,
 `agent loop --plan <path>`) — see roadmap for the fuller list. The
 worktree-isolation root cause is also still open if it's worth another look.
 
+## 2026-08-04 — Merge prompt: diff preview in a floating Zellij pane
+
+### Done
+- Added `_show_diff_in_editor()` + `_zellij_edit()` to `runner/loop.py`, called from `_offer_merge` right before the y/n prompt: if `$ZELLIJ` is set, writes `git diff HEAD..branch` to a temp `.diff` file and opens it via `zellij action edit --floating --near-current-pane` (uses `$EDITOR`, which is Helix per the user's global mise/zsh config). No-op everywhere else — purely additive, doesn't touch the plain-terminal commit-list flow.
+- Investigated `~/source/workspace`'s `ws`/Zellij setup first: floating panes are already a first-class part of both layouts (`dev.kdl` and `dev-wide.kdl`, toggled with Alt+f), so `--floating` fits existing conventions rather than introducing a new one.
+- 3 new tests (`TestShowDiffInEditor`) plus `monkeypatch.delenv("ZELLIJ", raising=False)` added to the 3 existing `TestOfferMerge` tests that call `_offer_merge` for real — without that, running the suite from inside an actual `ws` session (the user's normal daily setup) would have spawned real floating panes as a test side effect. 93 tests passing, `ruff`/`pyright` clean.
+

@@ -106,6 +106,7 @@ Goal: the loop learns across sessions and recovers from known failure modes with
 | Error recovery templates for recurring failure modes | pending |
 | Per-task git commit in worktree branch | ✅ |
 | Interactive merge prompt after successful run (y/n fast-forward into main) | ✅ |
+| Merge prompt opens the branch's diff in a floating Zellij pane (`$EDITOR`) before asking y/n — personal workflow convenience, no-op outside Zellij | ✅ |
 | PR creation for review | pending |
 | **Keep the branch on task failure instead of `git branch -D`** — today any failed task discards every already-completed task's commits on that run, not just the failing one (`runner/sandbox/worktree.py`) | pending |
 | `agent loop --resume` — detect an existing `agent/*` branch with completed task commits, skip them, continue from the first incomplete task | pending — blocked by the item above |

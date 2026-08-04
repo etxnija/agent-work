@@ -18,6 +18,7 @@ from runner.loop import (
     _offer_merge,
     _parse_tasks,
     _run_sensors,
+    _show_diff_in_editor,
     _task_title,
     run_loop,
 )
@@ -714,7 +715,8 @@ class TestBranchCommits:
 
 
 class TestOfferMerge:
-    def test_no_commits_prints_warning_and_returns(self, tmp_path, capsys):
+    def test_no_commits_prints_warning_and_returns(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.delenv("ZELLIJ", raising=False)
         _init_repo(tmp_path)
         subprocess.run(["git", "checkout", "-b", "agent/empty"],
                        cwd=tmp_path, check=True, capture_output=True)
@@ -724,7 +726,8 @@ class TestOfferMerge:
         out = capsys.readouterr().out
         assert "no commits" in out.lower()
 
-    def test_merge_y_squashes_into_one_commit_and_deletes_branch(self, tmp_path, capsys):
+    def test_merge_y_squashes_into_one_commit_and_deletes_branch(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.delenv("ZELLIJ", raising=False)
         env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
                "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
         _init_repo(tmp_path)
@@ -758,7 +761,8 @@ class TestOfferMerge:
         assert len(log) == 2  # init + one squash commit
         assert "add a and b" in log[0]  # subject is the task description
 
-    def test_merge_n_preserves_branch_and_prints_instructions(self, tmp_path, capsys):
+    def test_merge_n_preserves_branch_and_prints_instructions(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.delenv("ZELLIJ", raising=False)
         _init_repo(tmp_path)
         _make_branch_with_commit(tmp_path, "agent/feat", "add feature")
 
@@ -801,3 +805,48 @@ class TestOfferMerge:
             run_loop("task")
 
         mock_merge.assert_not_called()
+
+
+class TestShowDiffInEditor:
+    def test_noop_when_not_in_zellij(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ZELLIJ", raising=False)
+        _init_repo(tmp_path)
+        _make_branch_with_commit(tmp_path, "agent/feat", "add feature")
+
+        with patch("runner.loop._zellij_edit") as mock_edit:
+            _show_diff_in_editor("agent/feat", tmp_path)
+
+        mock_edit.assert_not_called()
+
+    def test_noop_when_branch_has_no_diff(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ZELLIJ", "0")
+        _init_repo(tmp_path)
+        subprocess.run(["git", "checkout", "-b", "agent/empty"],
+                       cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True)
+
+        with patch("runner.loop._zellij_edit") as mock_edit:
+            _show_diff_in_editor("agent/empty", tmp_path)
+
+        mock_edit.assert_not_called()
+
+    def test_opens_editor_with_diff_file_when_in_zellij(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ZELLIJ", "0")
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        _init_repo(tmp_path)
+        subprocess.run(["git", "checkout", "-b", "agent/feat"],
+                       cwd=tmp_path, check=True, capture_output=True)
+        (tmp_path / "feature.txt").write_text("new feature\n")
+        subprocess.run(["git", "add", "feature.txt"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add feature"],
+                       cwd=tmp_path, check=True, capture_output=True, env=env)
+        subprocess.run(["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True)
+
+        with patch("runner.loop._zellij_edit") as mock_edit:
+            _show_diff_in_editor("agent/feat", tmp_path)
+
+        mock_edit.assert_called_once()
+        diff_path = Path(mock_edit.call_args[0][0])
+        assert diff_path.suffix == ".diff"
+        assert "feature.txt" in diff_path.read_text()

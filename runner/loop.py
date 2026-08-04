@@ -12,8 +12,10 @@ Environment:
 """
 
 import hashlib
+import os
 import re
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -164,6 +166,41 @@ def _branch_commits(branch: str, project_root: Path) -> list[str]:
     return [l for l in result.stdout.splitlines() if l.strip()]
 
 
+def _zellij_edit(path: str) -> None:
+    """Open path in a floating Zellij pane using $EDITOR."""
+    subprocess.run(
+        ["zellij", "action", "edit", "--floating", "--near-current-pane", path],
+        capture_output=True,
+        check=False,
+    )
+
+
+def _show_diff_in_editor(branch: str, project_root: Path) -> None:
+    """
+    Open the branch's full diff against HEAD in a floating editor pane, if
+    running inside Zellij. A no-op everywhere else — this is a personal
+    workflow convenience, not something the harness depends on.
+    """
+    if "ZELLIJ" not in os.environ:
+        return
+
+    diff = subprocess.run(
+        ["git", "diff", f"HEAD..{branch}"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if not diff.stdout.strip():
+        return
+
+    fd, path = tempfile.mkstemp(prefix="agent-diff-", suffix=".diff")
+    with os.fdopen(fd, "w") as f:
+        f.write(diff.stdout)
+
+    _zellij_edit(path)
+
+
 def _offer_merge(branch: str, project_root: Path, task: str = "") -> None:
     """
     Show commits on branch and offer a squash-merge into HEAD.
@@ -183,6 +220,8 @@ def _offer_merge(branch: str, project_root: Path, task: str = "") -> None:
     print(f"\n[merge] Branch '{branch}' — {len(commits)} commit(s) to squash into main:")
     for c in commits:
         print(f"  {c}")
+
+    _show_diff_in_editor(branch, project_root)
 
     answer = input("\n[merge] Squash-merge into current branch? (y/n) ").strip().lower()
     if answer != "y":

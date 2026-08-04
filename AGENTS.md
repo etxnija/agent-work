@@ -74,3 +74,4 @@ memory/           AGENTS.md (this file) + status.md (work log)
 - **`.claude/settings.json` is the allow/deny list** for expected non-interactive commands. If the worker tries a command not in `allow` and not in `deny`, Claude will prompt — which hangs an unattended run. Add expected commands to `allow` when a new stack is introduced.
 - The planner agent must output `PLAN READY — awaiting approval.` as its final line; the loop checks for this string.
 - Worker runs inside a git worktree (separate directory, same repo). Context files are passed as absolute paths. Status.md writes go to the project root, not the worktree.
+- `_show_diff_in_editor` (merge prompt) shells out to `zellij action edit`, gated on `$ZELLIJ` being set. Personal workflow convenience, not a harness dependency — always a no-op outside Zellij, including in tests (existing merge tests explicitly `delenv("ZELLIJ")` so the suite stays hermetic regardless of the calling shell).

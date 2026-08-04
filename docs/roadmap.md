@@ -74,7 +74,6 @@ Goal: the loop gets deterministic feedback on what the worker produces. The work
 | `sensors/test.sh` — test suite runs after worker, failures fed back | ✅ |
 | LSP feedback (batch-CLI: `pyright`, Python only) — type errors injected into worker context | ✅ |
 | 100% test coverage enforced on new code | pending |
-| Metrics — track pass/fail, token cost per loop run | pending |
 
 ---
 
@@ -92,6 +91,42 @@ ADR-0011.
 | Bootstrap prompts for a per-sensor command override, preset pre-filled as default | pending |
 | `agent sensors sync` — diff project's `sensors/` against current presets, apply per-file with review | pending |
 | Coverage / code-health sensors added as new presets (reuse `_run_sensors()`, no `loop.py` changes) | pending |
+
+---
+
+## Phase 2.2 — Metrics
+
+Goal: driver-call cost and count visible per task and per run, with a single obvious
+accumulation point so a second metric (retry counts, wall-clock time) is a small
+addition later, not a redesign. Moved up from Phase 4 (PRD, 2026-08-04) — prerequisite
+for Phase 2.3, since adversarial review adds a second independent retry multiplier
+that shouldn't land without cost visibility.
+
+| Item | Status |
+|---|---|
+| Track `AgentResult.cost_usd` per driver call (field already exists, unused — see Phase 2 plan's "Out of scope") | pending |
+| Aggregate cost + call count per task | pending |
+| Print a per-run summary (total cost, total calls) at the end of `agent loop` | pending |
+| Accumulation point designed so retry counts / wall-clock time are small additions later | pending |
+
+---
+
+## Phase 2.3 — Adversarial review
+
+Goal: a second, independent agent critiques each task's diff before it's committed —
+judgment calls a script can't make, same feedback-retry shape as sensors. Moved up
+from Phase 4 Could-have to Should-have (PRD, 2026-08-04): "fits directly on top of
+the sensor-retry infrastructure that already exists, and is useful even in attended
+use, not just for Phase 4's unattended-autonomy goals." Blocked by Phase 2.2 (cost
+visibility).
+
+| Item | Status |
+|---|---|
+| Reviewer sub-agent runs after sensors pass, before commit | pending |
+| Verdict signaled via a marker line (mirrors the planner's `PLAN READY` signal), not structured output | pending |
+| On disagreement: critique fed back to the worker as a corrective prompt, same shape as a sensor failure | pending |
+| `REVIEW_RETRY_LIMIT` (2) — unlike sensors, does **not** fail closed: commits anyway after the retry budget | pending |
+| Outstanding critique surfaced at the merge-diff review step (dovetails with the Zellij diff-preview pane) instead of discarding real work over a model disagreement | pending |
 
 ---
 
@@ -116,7 +151,8 @@ Goal: the loop learns across sessions and recovers from known failure modes with
 
 ## Phase 4 — Tracing & sub-agents
 
-Goal: scale up autonomy — overnight runs, model routing, adversarial review.
+Goal: scale up autonomy — overnight runs, model routing. (Adversarial review moved to
+Phase 2.3 — PRD, 2026-08-04.)
 
 | Item | Status |
 |---|---|
@@ -126,7 +162,6 @@ Goal: scale up autonomy — overnight runs, model routing, adversarial review.
 | Memory compaction (summarise status.md when it grows large) | pending |
 | Model router (select model by task; local-hosted subagents) | pending |
 | Insights of model thinking (surface chain-of-thought) | pending |
-| Adversarial review (second agent critiques before accepting) | pending |
 | Versioned upgrade path (multi-engineer) | pending |
 
 ---

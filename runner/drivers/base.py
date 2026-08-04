@@ -8,6 +8,7 @@ class AgentResult:
     text: str
     exit_code: int
     cost_usd: float | None = None
+    session_id: str | None = None
 
 
 class AgentDriver(ABC):

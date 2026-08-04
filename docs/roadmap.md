@@ -104,7 +104,7 @@ that shouldn't land without cost visibility.
 
 | Item | Status |
 |---|---|
-| Track `AgentResult.cost_usd` per driver call, routed through one accumulation point in loop.py | ✅ |
+| Track `AgentResult.cost_usd` per driver call, routed through one accumulation point in loop.py — extended to `session_id` (latest-wins, not accumulated) via the same `Metrics`/`_MeteredDriver` point | ✅ |
 | Print a per-task metrics summary | ✅ |
 | Print a per-run summary and append it to `memory/status.md` | ✅ |
 | Pass/fail history and richer metrics (retry counts, wall-clock time) | deferred — extension point only, not this phase |

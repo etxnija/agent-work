@@ -265,5 +265,35 @@ worktree-isolation root cause is also still open if it's worth another look.
 ### Done
 - Wrote `docs/arch/adr/0013-adversarial-review-marker-and-non-blocking-retry.md` (Context/Decision/Consequences, ~28 lines), documenting the marker-line verdict convention, the non-fail-closed-on-exhaustion decision, and the critique surfacing at `_show_diff_in_editor`. Plan complete — all 11 tasks done. Caught the worktree-vs-main-checkout leak once more (Write initially landed in `/Users/nils/source/agent-work` instead of the worktree `agent/20260804-115126`) — removed the leaked copy from `main` and rewrote into the correct worktree path before proceeding; `main` verified clean of it.
 
+## 2026-08-04 — Session-id plan task 1: `session_id` on `AgentResult`
 
-**Run metrics:** 15 driver call(s), $10.6327
+### Done
+- Added `session_id: str | None = None` to `AgentResult` (`runner/drivers/base.py`, after `cost_usd`), matching the existing optional-field style; not yet parsed/populated by any driver (later tasks). `ruff`/`pyright` clean.
+
+## 2026-08-04 — Session-id plan task 1 (redo): `session_id` on `AgentResult`
+
+### Done
+- Re-added `session_id: str | None = None` to `AgentResult` (`runner/drivers/base.py:10`) inside the correct worktree (`agent/20260804-124851`), per plan.md's note that the prior same-dated entry above was lost work from an unmerged worktree (field was absent from `main` before this task). `ruff`/`pyright` clean on `runner/drivers/base.py`; no leak into the main checkout.
+
+## 2026-08-04 — Session-id plan task 2: extract `session_id` in `_parse_result_json`
+
+### Done
+- Changed `_parse_result_json`'s return type from `tuple[str, float | None]` to `tuple[str, float | None, str | None]` (`runner/drivers/claude.py`), adding `parsed.get("session_id")` as the third element and `None` on both the invalid-JSON and non-dict fallback paths. Updated both call sites (`ClaudeDriver.run`, `ClaudeDriver.run_subagent`) to unpack the third value and pass `session_id=session_id` into `AgentResult(...)`. Updated `runner/drivers/test_claude.py`: `TestParseResultJson.CASES` now asserts 3-tuples, including a new case with `session_id` absent from the payload (expects `None`); `TestClaudeDriverRun.CASES` and the relevant `TestClaudeDriverRunSubagent` cases now include `"session_id"` in their mocked JSON and assert `result.session_id`. 121 tests passing, `ruff`/`pyright` clean; no leak into the main checkout (verified `git status` on both worktree and `main`).
+
+## 2026-08-04 — Session-id plan task 3: track `last_session_id` in `Metrics`
+
+### Done
+- Added `last_session_id: str | None = None` to `Metrics` (`runner/loop.py`) and a guard in `record()` (`if result.session_id is not None: self.last_session_id = result.session_id`) mirroring the existing `cost_usd` guard, so `None`-session_id results don't clobber the last known value. Added two cases to `TestMetrics` (`runner/test_loop.py`): `last_session_id` updates to the most recent non-`None` value across calls, and a `None`-session_id result leaves a prior value untouched. 123 tests passing, `ruff`/`pyright` clean; no leak into the main checkout (verified `git status` on both worktree `agent/20260804-124851` and `main`).
+
+## 2026-08-04 — Session-id plan task 4: print `session_id` on `[metrics]` lines and in status.md
+
+### Done
+- Extended the per-task `[metrics]` print, the run-total `[metrics]` print, and the matching `_append_status` "**Run metrics:**" line in `run_loop()` (`runner/loop.py`) to include `, session {run_metrics.last_session_id}`, read directly at print time (no snapshot needed). Added a `session_id` kwarg (default `None`) to `_ok()`/`_fail()` (`runner/test_loop.py`); updated the two exact-string assertions in `TestRunLoopSensorRetry` to `session None`, and rewrote `TestRunLoopMetricsSummary`'s `driver.run_subagent` mock to return a real session id (`"sess-review"`) on reviewer approval so its three print assertions plus the status.md append assert a real value flowing through, not just `None` everywhere. 123 tests passing, `ruff`/`pyright` clean; no leak into the main checkout (verified `git status` on both worktree `agent/20260804-124851` and `main`).
+
+## 2026-08-04 — Session-id plan task 5: sync docs/roadmap.md's Phase 2.2 row
+
+### Done
+- Amended `docs/roadmap.md`'s Phase 2.2 `cost_usd` accumulation-point row to note it was extended to `session_id` (latest-wins, not accumulated) via the same `Metrics`/`_MeteredDriver` point, since that row named the specific field `cost_usd` rather than using the section's general "cost/call visibility" wording — the other two rows (per-task/per-run summary) were already general enough to not need a change. Plan complete — all 5 tasks done. Caught the worktree-vs-main-checkout leak once more (Edit initially landed in `/Users/nils/source/agent-work` instead of the worktree `agent/20260804-124851`, since plan.md gives that absolute path) — reverted via `git checkout -- docs/roadmap.md` on `main` and reapplied the edit in the correct worktree path before finishing; `main` verified clean of it (memory/status.md diff there is the expected direct-to-project-root status write, not a leak).
+
+
+**Run metrics:** 11 driver call(s), $4.9868

@@ -128,23 +128,28 @@ class TestLoadAgentDefinition:
 class TestParseResultJson:
     CASES: ClassVar[list] = [
         pytest.param(
-            '{"result": "response text", "total_cost_usd": 0.0123}',
-            ("response text", 0.0123),
+            '{"result": "response text", "total_cost_usd": 0.0123, "session_id": "sess-1"}',
+            ("response text", 0.0123, "sess-1"),
             id="numeric_total_cost_usd",
         ),
         pytest.param(
-            '{"result": "response text", "total_cost_usd": null}',
-            ("response text", None),
+            '{"result": "response text", "total_cost_usd": null, "session_id": "sess-2"}',
+            ("response text", None, "sess-2"),
             id="null_total_cost_usd",
         ),
         pytest.param(
+            '{"result": "response text", "total_cost_usd": 0.02}',
+            ("response text", 0.02, None),
+            id="session_id_absent_defaults_to_none",
+        ),
+        pytest.param(
             "not valid json",
-            ("not valid json", None),
+            ("not valid json", None, None),
             id="invalid_json_falls_back_to_stripped_stdout",
         ),
         pytest.param(
             "",
-            ("", None),
+            ("", None, None),
             id="empty_string_falls_back_to_stripped_stdout",
         ),
     ]
@@ -196,10 +201,13 @@ class TestClaudeDriverRun:
                 "claude", "--print", "--dangerously-skip-permissions",
                 "--output-format", "json", "hello",
             ],
-            json.dumps({"result": "response text", "total_cost_usd": 0.01}),
+            json.dumps(
+                {"result": "response text", "total_cost_usd": 0.01, "session_id": "sess-a"}
+            ),
             "response text",
             0,
             0.01,
+            "sess-a",
             id="simple_prompt_no_context",
         ),
         pytest.param(
@@ -210,10 +218,11 @@ class TestClaudeDriverRun:
                 "claude", "--print", "--dangerously-skip-permissions",
                 "--output-format", "json", "do something",
             ],
-            json.dumps({"result": "", "total_cost_usd": None}),
+            json.dumps({"result": "", "total_cost_usd": None, "session_id": "sess-b"}),
             "",
             1,
             None,
+            "sess-b",
             id="non_zero_exit_code_propagated",
         ),
         pytest.param(
@@ -224,21 +233,25 @@ class TestClaudeDriverRun:
                 "claude", "--print", "--dangerously-skip-permissions",
                 "--output-format", "json", "another prompt",
             ],
-            json.dumps({"result": "another response", "total_cost_usd": 0.0567}),
+            json.dumps(
+                {"result": "another response", "total_cost_usd": 0.0567, "session_id": "sess-c"}
+            ),
             "another response",
             0,
             0.0567,
+            "sess-c",
             id="cost_usd_populated_from_json",
         ),
     ]
 
     @pytest.mark.parametrize(
-        "prompt,context_files,cwd,expected_args,stdout,expected_text,returncode,expected_cost",
+        "prompt,context_files,cwd,expected_args,stdout,expected_text,returncode,expected_cost,"
+        "expected_session_id",
         CASES,
     )
     def test_run(
         self, prompt, context_files, cwd, expected_args, stdout, expected_text, returncode,
-        expected_cost,
+        expected_cost, expected_session_id,
     ):
         mock_result = MagicMock()
         mock_result.stdout = stdout + "\n"
@@ -253,6 +266,7 @@ class TestClaudeDriverRun:
         assert result.text == expected_text
         assert result.exit_code == returncode
         assert result.cost_usd == expected_cost
+        assert result.session_id == expected_session_id
 
     def test_run_injects_context_files(self, tmp_path):
         ctx = tmp_path / "ctx.md"
@@ -288,7 +302,9 @@ class TestClaudeDriverRunSubagent:
         monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
 
         mock_result = MagicMock(
-            stdout=json.dumps({"result": "plan written", "total_cost_usd": 0.03}) + "\n",
+            stdout=json.dumps(
+                {"result": "plan written", "total_cost_usd": 0.03, "session_id": "sess-planner"}
+            ) + "\n",
             returncode=0,
         )
         with patch("subprocess.run", return_value=mock_result) as mock_run:
@@ -306,6 +322,7 @@ class TestClaudeDriverRunSubagent:
         assert "explore" in cmd[-1]
         assert result.text == "plan written"
         assert result.cost_usd == 0.03
+        assert result.session_id == "sess-planner"
 
     def test_uses_dangerously_skip_when_no_tools_declared(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "agents"
@@ -337,7 +354,9 @@ class TestClaudeDriverRunSubagent:
         monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
 
         mock_result = MagicMock(
-            stdout=json.dumps({"result": "plan written", "total_cost_usd": 0.01}) + "\n",
+            stdout=json.dumps(
+                {"result": "plan written", "total_cost_usd": 0.01, "session_id": "sess-compose"}
+            ) + "\n",
             returncode=0,
         )
         with patch("subprocess.run", return_value=mock_result) as mock_run:
@@ -347,6 +366,7 @@ class TestClaudeDriverRunSubagent:
         assert "You are the planner." in called_prompt
         assert "explore the codebase" in called_prompt
         assert result.text == "plan written"
+        assert result.session_id == "sess-compose"
 
     def test_returns_error_when_agent_not_found(self, tmp_path, monkeypatch):
         import runner.drivers.claude as mod
@@ -366,13 +386,16 @@ class TestClaudeDriverRunSubagent:
         monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
 
         mock_result = MagicMock(
-            stdout=json.dumps({"result": "done", "total_cost_usd": 0.0789}) + "\n",
+            stdout=json.dumps(
+                {"result": "done", "total_cost_usd": 0.0789, "session_id": "sess-worker"}
+            ) + "\n",
             returncode=0,
         )
         with patch("subprocess.run", return_value=mock_result):
             result = ClaudeDriver().run_subagent("worker", "task")
 
         assert result.cost_usd == 0.0789
+        assert result.session_id == "sess-worker"
 
     def test_passes_cwd_to_subprocess(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "agents"

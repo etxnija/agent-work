@@ -41,12 +41,12 @@ def _make_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _ok(text="") -> AgentResult:
-    return AgentResult(text=text, exit_code=0)
+def _ok(text="", session_id=None) -> AgentResult:
+    return AgentResult(text=text, exit_code=0, session_id=session_id)
 
 
-def _fail(text="error") -> AgentResult:
-    return AgentResult(text=text, exit_code=1)
+def _fail(text="error", session_id=None) -> AgentResult:
+    return AgentResult(text=text, exit_code=1, session_id=session_id)
 
 
 def _plan_then_approve(agent_name, prompt, cwd=None) -> AgentResult:
@@ -124,6 +124,22 @@ class TestMetrics:
 
         assert metrics.calls == 1
         assert metrics.cost_usd == 0.0
+
+    def test_record_updates_last_session_id_to_most_recent(self):
+        metrics = Metrics()
+
+        metrics.record(AgentResult(text="a", exit_code=0, session_id="sess-1"))
+        metrics.record(AgentResult(text="b", exit_code=0, session_id="sess-2"))
+
+        assert metrics.last_session_id == "sess-2"
+
+    def test_record_with_none_session_id_leaves_prior_value_untouched(self):
+        metrics = Metrics()
+
+        metrics.record(AgentResult(text="a", exit_code=0, session_id="sess-1"))
+        metrics.record(AgentResult(text="b", exit_code=0, session_id=None))
+
+        assert metrics.last_session_id == "sess-1"
 
 
 class TestMeteredDriver:
@@ -565,7 +581,9 @@ class TestRunLoopSensorRetry:
         assert code == 0
         assert driver.run.call_count == 1  # only the worker call, no corrective retry
         mock_commit.assert_called_once()
-        mock_print.assert_any_call("[metrics] Task 1/1: 2 driver call(s), $0.0000")  # worker + review approval
+        mock_print.assert_any_call(
+            "[metrics] Task 1/1: 2 driver call(s), $0.0000, session None"
+        )  # worker + review approval
 
     def test_sensors_fail_once_then_pass_retries_and_commits(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
@@ -587,7 +605,9 @@ class TestRunLoopSensorRetry:
         assert code == 0
         assert driver.run.call_count == 2  # initial worker call + one corrective call
         mock_commit.assert_called_once()
-        mock_print.assert_any_call("[metrics] Task 1/1: 3 driver call(s), $0.0000")  # worker + corrective + review approval
+        mock_print.assert_any_call(
+            "[metrics] Task 1/1: 3 driver call(s), $0.0000, session None"
+        )  # worker + corrective + review approval
 
     def test_sensors_fail_every_retry_fails_closed_without_commit(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
@@ -763,8 +783,13 @@ class TestRunLoopMetricsSummary:
             status.write_text(status.read_text() + "- done\n")
             return _ok()
 
+        def run_subagent_side_effect(agent_name, prompt, cwd=None):
+            if agent_name == REVIEWER_AGENT:
+                return _ok(REVIEW_APPROVED_SIGNAL, session_id="sess-review")
+            return _ok(PLAN_READY_SIGNAL)
+
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
+        driver.run_subagent.side_effect = run_subagent_side_effect
         driver.run.side_effect = worker_side_effect
         gate = MagicMock()
         gate.request.return_value = True
@@ -784,12 +809,20 @@ class TestRunLoopMetricsSummary:
         # run total = planner (1 call)
         #   + task 1 (worker + review approval, no sensor retry = 2 calls)
         #   + task 2 (worker + corrective + review approval, one sensor retry = 3 calls)
-        mock_print.assert_any_call("[metrics] Task 1/2: 2 driver call(s), $0.0000")
-        mock_print.assert_any_call("[metrics] Task 2/2: 3 driver call(s), $0.0000")
-        mock_print.assert_any_call("[metrics] Run total: 6 driver call(s), $0.0000")
+        # session id asserted as a real value (not None) so this fails if session
+        # tracking gets wired to the wrong source.
+        mock_print.assert_any_call(
+            "[metrics] Task 1/2: 2 driver call(s), $0.0000, session sess-review"
+        )
+        mock_print.assert_any_call(
+            "[metrics] Task 2/2: 3 driver call(s), $0.0000, session sess-review"
+        )
+        mock_print.assert_any_call(
+            "[metrics] Run total: 6 driver call(s), $0.0000, session sess-review"
+        )
 
         status_text = (tmp_path / "memory" / "status.md").read_text()
-        assert "**Run metrics:** 6 driver call(s), $0.0000" in status_text
+        assert "**Run metrics:** 6 driver call(s), $0.0000, session sess-review" in status_text
 
 
 # ── Main-checkout leak detection ─────────────────────────────────────────────

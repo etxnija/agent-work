@@ -58,19 +58,19 @@ def _load_agent_definition(name: str) -> tuple[str | None, list[str]]:
     return None, []
 
 
-def _parse_result_json(stdout: str) -> tuple[str, float | None]:
+def _parse_result_json(stdout: str) -> tuple[str, float | None, str | None]:
     """
-    Parse `claude --print --output-format json` stdout into (text, cost_usd).
-    Falls back to (stdout.strip(), None) on invalid JSON or a non-dict payload,
+    Parse `claude --print --output-format json` stdout into (text, cost_usd, session_id).
+    Falls back to (stdout.strip(), None, None) on invalid JSON or a non-dict payload,
     so a malformed or empty response degrades instead of raising.
     """
     try:
         parsed = json.loads(stdout)
     except json.JSONDecodeError:
-        return stdout.strip(), None
+        return stdout.strip(), None, None
     if not isinstance(parsed, dict):
-        return stdout.strip(), None
-    return parsed.get("result", ""), parsed.get("total_cost_usd")
+        return stdout.strip(), None, None
+    return parsed.get("result", ""), parsed.get("total_cost_usd"), parsed.get("session_id")
 
 
 def _inject_context(prompt: str, context_files: list[str]) -> str:
@@ -115,8 +115,8 @@ class ClaudeDriver(AgentDriver):
             cwd=cwd,
             check=False,
         )
-        text, cost_usd = _parse_result_json(result.stdout)
-        return AgentResult(text=text, exit_code=result.returncode, cost_usd=cost_usd)
+        text, cost_usd, session_id = _parse_result_json(result.stdout)
+        return AgentResult(text=text, exit_code=result.returncode, cost_usd=cost_usd, session_id=session_id)
 
     def run_subagent(
         self,
@@ -165,5 +165,5 @@ class ClaudeDriver(AgentDriver):
             ]
 
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=False)
-        text, cost_usd = _parse_result_json(result.stdout)
-        return AgentResult(text=text, exit_code=result.returncode, cost_usd=cost_usd)
+        text, cost_usd, session_id = _parse_result_json(result.stdout)
+        return AgentResult(text=text, exit_code=result.returncode, cost_usd=cost_usd, session_id=session_id)

@@ -45,11 +45,14 @@ REVIEW_RETRY_LIMIT = 2
 class Metrics:
     calls: int = 0
     cost_usd: float = 0.0
+    last_session_id: str | None = None
 
     def record(self, result: AgentResult) -> None:
         self.calls += 1
         if result.cost_usd is not None:
             self.cost_usd += result.cost_usd
+        if result.session_id is not None:
+            self.last_session_id = result.session_id
 
 
 class _MeteredDriver(AgentDriver):
@@ -581,16 +584,23 @@ def run_loop(task: str) -> int:
 
             task_calls = run_metrics.calls - calls_before
             task_cost = run_metrics.cost_usd - cost_before
-            print(f"[metrics] Task {i}/{len(tasks)}: {task_calls} driver call(s), ${task_cost:.4f}")
+            print(
+                f"[metrics] Task {i}/{len(tasks)}: {task_calls} driver call(s), "
+                f"${task_cost:.4f}, session {run_metrics.last_session_id}"
+            )
 
         handle.keep()  # all tasks complete → preserve the branch for merge
 
     if handle.branch:  # "" when NoopSandbox is active (tests / no-git projects)
         _offer_merge(handle.branch, project_root, task, review_critiques)
 
-    print(f"[metrics] Run total: {run_metrics.calls} driver call(s), ${run_metrics.cost_usd:.4f}")
+    print(
+        f"[metrics] Run total: {run_metrics.calls} driver call(s), "
+        f"${run_metrics.cost_usd:.4f}, session {run_metrics.last_session_id}"
+    )
     _append_status(
-        f"\n**Run metrics:** {run_metrics.calls} driver call(s), ${run_metrics.cost_usd:.4f}\n"
+        f"\n**Run metrics:** {run_metrics.calls} driver call(s), "
+        f"${run_metrics.cost_usd:.4f}, session {run_metrics.last_session_id}\n"
     )
 
     print(f"\n[loop] All {len(tasks)} tasks complete.")

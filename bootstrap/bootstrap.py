@@ -123,7 +123,7 @@ _SETTINGS_ALLOW_BASE = [
 _SETTINGS_ALLOW_LANG = {
     "go":         ["Bash(go test*)", "Bash(go build*)", "Bash(golangci-lint*)"],
     "typescript": ["Bash(npm test*)", "Bash(npm run*)", "Bash(npx eslint*)"],
-    "python":     ["Bash(pytest*)", "Bash(python -m pytest*)", "Bash(ruff*)", "Bash(pyright*)"],
+    "python":     ["Bash(pytest*)", "Bash(python -m pytest*)", "Bash(ruff*)", "Bash(pyright*)", "Bash(diff-cover*)"],
     "":           [],
 }
 
@@ -152,8 +152,9 @@ SENSORS = {
     },
     "python": {
         "lint.sh": "#!/bin/sh\nset -e\nruff check --fix .\n",
-        "test.sh": "#!/bin/sh\nset -e\npytest\n",
+        "test.sh": "#!/bin/sh\nset -e\npytest --cov=runner --cov=bootstrap --cov=cli --cov-report=xml --cov-report=json --cov-report=term-missing\ndiff-cover coverage.xml --compare-branch=main --fail-under=100\npython3 sensors/_coverage_floor.py\n",
         "lsp.sh": "#!/bin/sh\nset -e\npyright --outputjson\n",
+        "_coverage_floor.py": "#!/usr/bin/env python3\n\"\"\"Check 2: whole-repo coverage regression floor vs. main's cached baseline.\"\"\"\n\nimport json\nimport sys\nfrom pathlib import Path\n\nTOLERANCE = 1.0\n\n\ndef main() -> int:\n    current = json.loads(Path(\"coverage.json\").read_text())[\"totals\"][\"percent_covered\"]\n\n    baseline_path = Path(\".coverage-baseline\")\n    if not baseline_path.exists():\n        print(\"[coverage] no baseline yet, skipping\")\n        return 0\n\n    baseline = float(baseline_path.read_text().strip())\n    drop = baseline - current\n\n    if drop > TOLERANCE:\n        print(\n            f\"Whole-repo coverage dropped from {baseline:.2f}% to {current:.2f}% \"\n            f\"(more than {TOLERANCE} point tolerance vs main).\"\n        )\n        return 1\n\n    print(f\"Whole-repo coverage: {current:.2f}% (baseline {baseline:.2f}%)\")\n    return 0\n\n\nif __name__ == \"__main__\":\n    sys.exit(main())\n",
     },
     "": {
         "lint.sh": "#!/bin/sh\n# TODO: add lint command for your stack\necho 'lint: not configured'\n",

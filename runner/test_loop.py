@@ -1,5 +1,6 @@
 """Tests for runner/loop.py."""
 
+import json
 import os
 import subprocess
 from contextlib import contextmanager
@@ -36,6 +37,7 @@ from runner.loop import (
     _show_diff_in_editor,
     _task_diff,
     _task_title,
+    _update_coverage_baseline,
     _worker_summary,
     _write_narrative,
     run_loop,
@@ -1650,6 +1652,50 @@ class TestBranchCommits:
         assert _branch_commits("agent/empty", tmp_path) == []
 
 
+class TestUpdateCoverageBaseline:
+    def test_successful_run_writes_baseline_and_commits(self, tmp_path, monkeypatch):
+        def fake_run(cmd, cwd, **kwargs):
+            if cmd[0] == "pytest":
+                (tmp_path / "coverage.json").write_text(
+                    json.dumps({"totals": {"percent_covered": 87.654}})
+                )
+                return MagicMock(returncode=0)
+            return MagicMock(returncode=0)
+
+        mock_run = MagicMock(side_effect=fake_run)
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        _update_coverage_baseline(tmp_path)
+
+        assert (tmp_path / ".coverage-baseline").read_text() == "87.654"
+        assert not (tmp_path / "coverage.json").exists()
+        commands = [call.args[0][:2] for call in mock_run.call_args_list]
+        assert ["git", "add"] in commands
+        assert ["git", "commit"] in commands
+
+    def test_failed_pytest_run_leaves_existing_baseline_untouched(self, tmp_path, monkeypatch):
+        (tmp_path / ".coverage-baseline").write_text("42.0")
+
+        mock_run = MagicMock(return_value=MagicMock(returncode=1))
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        _update_coverage_baseline(tmp_path)
+
+        assert (tmp_path / ".coverage-baseline").read_text() == "42.0"
+        assert all(call.args[0][0] != "git" for call in mock_run.call_args_list)
+
+    def test_missing_coverage_json_after_success_behaves_like_failure(self, tmp_path, monkeypatch):
+        (tmp_path / ".coverage-baseline").write_text("42.0")
+
+        mock_run = MagicMock(return_value=MagicMock(returncode=0))
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        _update_coverage_baseline(tmp_path)
+
+        assert (tmp_path / ".coverage-baseline").read_text() == "42.0"
+        assert all(call.args[0][0] != "git" for call in mock_run.call_args_list)
+
+
 class TestOfferMerge:
     def test_no_commits_prints_warning_and_returns(self, tmp_path, capsys, monkeypatch):
         monkeypatch.delenv("ZELLIJ", raising=False)
@@ -1803,6 +1849,7 @@ class TestOfferMerge:
              patch("runner.loop._commit_task"), \
              patch("runner.loop._offer_merge", return_value="merged") as mock_offer, \
              patch("runner.loop._append_narrative_outcome") as mock_append, \
+             patch("runner.loop._update_coverage_baseline") as mock_baseline, \
              patch("builtins.print"):
             code = run_loop("task")
 
@@ -1815,6 +1862,39 @@ class TestOfferMerge:
         assert narrative_path.name.startswith("run-") and narrative_path.name.endswith(".md")
         assert narrative_path.exists()
         mock_append.assert_called_once_with(narrative_path, "merged")
+        mock_baseline.assert_called_once_with(Path.cwd().resolve())
+
+    def test_declined_outcome_does_not_update_coverage_baseline(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(SINGLE_TASK_PLAN)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = _plan_then_approve
+
+        def worker_side_effect(prompt, context_files, cwd=None):
+            status = tmp_path / "memory" / "status.md"
+            status.write_text(status.read_text() + "- done\n")
+            return _ok()
+
+        driver.run.side_effect = worker_side_effect
+        gate = MagicMock()
+        gate.request.return_value = True
+        fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
+             patch("runner.loop._run_sensors", return_value=[]), \
+             patch("runner.loop._commit_task"), \
+             patch("runner.loop._offer_merge", return_value="declined"), \
+             patch("runner.loop._append_narrative_outcome"), \
+             patch("runner.loop._update_coverage_baseline") as mock_baseline, \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert code == 0
+        mock_baseline.assert_not_called()
 
 
 class TestShowDiffInEditor:

@@ -74,7 +74,7 @@ Goal: the loop gets deterministic feedback on what the worker produces. The work
 | `sensors/lint.sh` — linter runs after worker, output fed back | ✅ |
 | `sensors/test.sh` — test suite runs after worker, failures fed back | ✅ |
 | LSP feedback (batch-CLI: `pyright`, Python only) — type errors injected into worker context | ✅ |
-| 100% test coverage enforced on new code | pending |
+| 100% diff-aware coverage on new/changed code (`diff-cover`) + a whole-repo regression floor vs. main's cached baseline (`coverage.py`) | ✅ |
 
 ---
 

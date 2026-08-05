@@ -12,6 +12,7 @@ Environment:
 """
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -579,6 +580,44 @@ def _offer_merge(
     return "commit failed"
 
 
+def _update_coverage_baseline(project_root: Path) -> None:
+    """
+    Refresh .coverage-baseline from main's current whole-repo coverage %.
+
+    Best-effort: a failure here must not undo an already-successful merge,
+    so it warns and leaves the existing baseline (if any) untouched rather
+    than raising.
+    """
+    coverage_json = project_root / "coverage.json"
+
+    result = subprocess.run(
+        ["pytest", "--cov=runner", "--cov=bootstrap", "--cov=cli", "--cov-report=json"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or not coverage_json.exists():
+        print("[coverage] Baseline update skipped: coverage run failed or produced no report.")
+        return
+
+    percent_covered = json.loads(coverage_json.read_text())["totals"]["percent_covered"]
+    (project_root / ".coverage-baseline").write_text(str(percent_covered))
+
+    coverage_json.unlink(missing_ok=True)
+    (project_root / ".coverage").unlink(missing_ok=True)
+
+    subprocess.run(
+        ["git", "add", ".coverage-baseline"], cwd=project_root, capture_output=True, check=False
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "Update coverage baseline"],
+        cwd=project_root,
+        capture_output=True,
+        check=False,
+    )
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def run_loop(task: str) -> int:
@@ -788,6 +827,8 @@ def run_loop(task: str) -> int:
             handle.branch, project_root, task, review_critiques, narrative_path=narrative_path
         )
         _append_narrative_outcome(narrative_path, outcome)
+        if outcome == "merged":
+            _update_coverage_baseline(project_root)
 
     print(
         f"[metrics] Run total: {run_metrics.calls} driver call(s), "

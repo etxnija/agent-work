@@ -4,3 +4,6 @@ __pycache__/
 .pytest_cache/
 plan.md
 logs/
+coverage.xml
+coverage.json
+.coverage

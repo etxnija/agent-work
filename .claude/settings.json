@@ -4,6 +4,7 @@
       "Bash(pytest*)",
       "Bash(python -m pytest*)",
       "Bash(pyright*)",
+      "Bash(diff-cover*)",
       "Bash(mise run*)",
       "Bash(git add*)",
       "Bash(git commit*)",

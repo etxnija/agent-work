@@ -9,7 +9,6 @@ import pytest
 from runner.drivers.claude import (
     ClaudeDriver,
     _inject_context,
-    _load_agent_body,
     _load_agent_definition,
     _parse_frontmatter,
     _parse_result_json,
@@ -44,45 +43,6 @@ class TestParseFrontmatter:
         fields, body = _parse_frontmatter(content)
         assert fields == expected_fields
         assert body == expected_body
-
-
-# ── _load_agent_body ──────────────────────────────────────────────────────────
-
-class TestLoadAgentBody:
-    CASES: ClassVar[list] = [
-        pytest.param(
-            "---\nname: test\ntools: Read\n---\nBody content here",
-            "Body content here",
-            id="strips_yaml_frontmatter",
-        ),
-        pytest.param(
-            "No frontmatter, just body",
-            "No frontmatter, just body",
-            id="no_frontmatter_returned_as_is",
-        ),
-        pytest.param(
-            "---\nname: test\n---\n\n  Leading whitespace  \n",
-            "Leading whitespace",
-            id="body_is_stripped",
-        ),
-    ]
-
-    @pytest.mark.parametrize("content,expected", CASES)
-    def test_load(self, tmp_path, monkeypatch, content, expected):
-        agent_dir = tmp_path / "agents"
-        agent_dir.mkdir()
-        (agent_dir / "myagent.md").write_text(content)
-
-        import runner.drivers.claude as mod
-        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
-
-        assert _load_agent_body("myagent") == expected
-
-    def test_returns_none_when_not_found(self, tmp_path, monkeypatch):
-        import runner.drivers.claude as mod
-        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [tmp_path / "agents"])
-
-        assert _load_agent_body("nonexistent") is None
 
 
 # ── _load_agent_definition ────────────────────────────────────────────────────

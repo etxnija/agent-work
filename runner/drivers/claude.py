@@ -29,19 +29,6 @@ def _parse_frontmatter(content: str) -> tuple[dict[str, str], str]:
     return fields, parts[2].strip()
 
 
-def _load_agent_body(name: str) -> str | None:
-    """
-    Find agents/<name>.md and return its body (below the YAML frontmatter).
-    Returns None if not found.
-    """
-    for base in _AGENT_SEARCH_PATHS:
-        candidate = base / f"{name}.md"
-        if candidate.exists():
-            _, body = _parse_frontmatter(candidate.read_text())
-            return body
-    return None
-
-
 def _load_agent_definition(name: str) -> tuple[str | None, list[str]]:
     """
     Load an agent definition. Returns (body, tools_list).

@@ -1,3 +1,3 @@
 #!/bin/sh
 set -e
-ruff check .
+ruff check --fix .

@@ -147,6 +147,23 @@ agents already produce, not a new summarization call.
 
 ---
 
+## Phase 2.5 — Sensor cost optimization
+
+Goal: cut wasted compute and noisy corrective prompts in the per-task sensor pass.
+Sensors already run cheap-to-expensive (`lint.sh`, `lsp.sh`, `test.sh`); running an
+expensive sensor after a cheap one already failed wasted compute and produced
+confounded corrective prompts. `ruff check --fix` mechanically resolves lint issues a
+model correction would otherwise be spent on.
+
+| Item | Status |
+|---|---|
+| `_run_sensors()` short-circuits at the first failing sensor instead of running the full sorted set | ✅ |
+| `SENSOR_RETRY_LIMIT` stays a single budget shared across serialized failures surfaced one at a time, not reset per sensor | ✅ |
+| `sensors/lint.sh` — `ruff check --fix .` auto-fixes safe violations before reporting failure | ✅ |
+| `bootstrap.py`'s Python lint preset mirrors the auto-fix change for newly bootstrapped projects | ✅ |
+
+---
+
 ## Phase 3 — Feedback flywheel
 
 Goal: the loop learns across sessions and recovers from known failure modes without human intervention.

@@ -372,19 +372,22 @@ class TestRunSensors:
         assert name == "lint.sh"
         assert "lint error" in output
 
-    def test_multiple_failures_captured_in_sorted_order(self, tmp_path):
+    def test_short_circuits_at_first_failure(self, tmp_path):
         sensors = tmp_path / "sensors"
         sensors.mkdir()
-        (sensors / "b_test.sh").write_text("#!/bin/sh\necho 'b failed'\nexit 1\n")
+        marker = tmp_path / "b_ran"
         (sensors / "a_lint.sh").write_text("#!/bin/sh\necho 'a failed'\nexit 1\n")
+        (sensors / "b_test.sh").write_text(
+            f"#!/bin/sh\ntouch {marker}\necho 'b failed'\nexit 1\n"
+        )
         (sensors / "c_ok.sh").write_text("#!/bin/sh\nexit 0\n")
 
         failures = _run_sensors(tmp_path)
 
-        assert [name for name, _ in failures] == ["a_lint.sh", "b_test.sh"]
+        assert [name for name, _ in failures] == ["a_lint.sh"]
         outputs = dict(failures)
         assert "a failed" in outputs["a_lint.sh"]
-        assert "b failed" in outputs["b_test.sh"]
+        assert not marker.exists()
 
     def test_no_sensors_directory_returns_empty(self, tmp_path):
         assert _run_sensors(tmp_path) == []
@@ -440,6 +443,30 @@ class TestRunSensorsWithRetry:
         assert failures[0][0] == "lint.sh"
         assert attempt == SENSOR_RETRY_LIMIT
         assert driver.run.call_count == SENSOR_RETRY_LIMIT
+
+    def test_two_failures_surfaced_serially_share_one_budget(self, tmp_path):
+        sensors = tmp_path / "sensors"
+        sensors.mkdir()
+        a_lint = sensors / "a_lint.sh"
+        b_test = sensors / "b_test.sh"
+        a_lint.write_text("#!/bin/sh\necho 'a failed'\nexit 1\n")
+        b_test.write_text("#!/bin/sh\necho 'b failed'\nexit 1\n")
+
+        def fix_currently_reported(prompt, context_files, cwd=None):
+            if "a_lint.sh" in prompt:
+                a_lint.write_text("#!/bin/sh\nexit 0\n")
+            elif "b_test.sh" in prompt:
+                b_test.write_text("#!/bin/sh\nexit 0\n")
+            return _ok()
+
+        driver = MagicMock()
+        driver.run.side_effect = fix_currently_reported
+
+        failures, attempt = _run_sensors_with_retry(*self._args(tmp_path, driver))
+
+        assert failures == []
+        assert attempt == 2
+        assert driver.run.call_count == 2
 
 
 # ── Planner failures ──────────────────────────────────────────────────────────

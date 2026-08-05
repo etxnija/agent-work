@@ -151,7 +151,7 @@ SENSORS = {
         "test.sh": "#!/bin/sh\nset -e\nnpm test\n",
     },
     "python": {
-        "lint.sh": "#!/bin/sh\nset -e\nruff check .\n",
+        "lint.sh": "#!/bin/sh\nset -e\nruff check --fix .\n",
         "test.sh": "#!/bin/sh\nset -e\npytest\n",
         "lsp.sh": "#!/bin/sh\nset -e\npyright --outputjson\n",
     },

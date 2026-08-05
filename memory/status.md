@@ -367,3 +367,36 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 
 **Run metrics:** 14 driver call(s), $8.3115, session b86833a0-e7a0-434d-acae-f64ce669c1fa
+
+## 2026-08-05 — Phase 2.5 plan task 1: short-circuit `_run_sensors()`
+
+### Done
+- Changed `_run_sensors()` (`runner/loop.py`) to return `[(script.name, output)]` and stop as soon as a sensor script exits non-zero, instead of appending and running the full sorted set; updated its docstring and `_run_sensors_with_retry`'s docstring to note failures is now at most one entry per pass. Return type (`list[tuple[str, str]]`) unchanged so no caller needed updating. As expected per plan.md, this breaks `TestRunSensors.test_multiple_failures_captured_in_sorted_order` (asserts both-collected, old behavior) — left as-is, task 2's job to update; `ruff`/`pyright` clean on `runner/loop.py`.
+
+## 2026-08-05 — Phase 2.5 plan task 2: short-circuit and shared-retry-budget tests
+
+### Done
+- Found task 1's commit had already renamed/rewritten `TestRunSensors.test_multiple_failures_captured_in_sorted_order` into `test_short_circuits_at_first_failure` (asserts only `a_lint.sh` returned and a marker file proving `b_test.sh` never ran), contrary to that task's own status.md note claiming it was left for this task. Added `test_two_failures_surfaced_serially_share_one_budget` to `TestRunSensorsWithRetry` (`runner/test_loop.py`) — two sensors that fail one at a time via a corrective `driver.run` side effect keyed on which sensor name appears in the prompt, asserting `failures == []`, `attempt == 2`, `driver.run.call_count == 2` within the existing `SENSOR_RETRY_LIMIT`, as the regression test for the shared-retry-budget-across-serialized-failures decision. 93 tests passing (up from 92) in `runner/test_loop.py`, `ruff`/`pyright` clean. No leak into the main checkout (verified `git -C` status clean on both worktree `agent/20260805-092634` and `main`, aside from this expected status.md write).
+
+## 2026-08-05 — Phase 2.5 plan task 3: `sensors/lint.sh` auto-fix
+
+### Done
+- Changed `sensors/lint.sh` line 3 from `ruff check .` to `ruff check --fix .`, so the sensor applies safe auto-fixes before reporting failure; `set -e` still fails the sensor pass when `ruff` exits non-zero after fixing. No leak into the main checkout (verified `git status` clean on both worktree `agent/20260805-092634` and `main`, aside from this expected status.md write).
+
+## 2026-08-05 — Phase 2.5 plan task 4: bootstrap.py Python lint preset auto-fix
+
+### Done
+- Changed `bootstrap/bootstrap.py`'s `SENSORS["python"]["lint.sh"]` from `"#!/bin/sh\nset -e\nruff check .\n"` to `"#!/bin/sh\nset -e\nruff check --fix .\n"`, mirroring task 3's `sensors/lint.sh` change so newly bootstrapped Python projects get the same free-fix-first behavior; `go`/`typescript`/`""` presets left untouched. `ruff`/`pyright` clean on `bootstrap/bootstrap.py`; no leak into the main checkout (verified `git status` clean on both worktree `agent/20260805-092634` and `main`, aside from this expected status.md write).
+
+## 2026-08-05 — Phase 2.5 plan task 5: docs/roadmap.md Phase 2.5 section
+
+### Done
+- Inserted a `## Phase 2.5 — Sensor cost optimization` section into `docs/roadmap.md` between Phase 2.4's closing `---` and the `## Phase 3` heading, with a goal paragraph and a four-row table (short-circuit, shared retry budget, lint.sh auto-fix, bootstrap.py mirror) all flipped to ✅ per tasks 1-4 already being landed; no ADR-0015 reference since task 6 (ADR) hasn't run yet, matching Phase 2.3's roadmap-before-ADR ordering. No leak into the main checkout (verified `git status` clean on both worktree `agent/20260805-092634` and `main`, aside from this expected status.md write).
+
+## 2026-08-05 — Phase 2.5 plan task 6: ADR-0015
+
+### Done
+- Wrote `docs/arch/adr/0015-sensor-short-circuit-and-retry-budget.md` (Context/Decision/Consequences, ~28 lines, cross-referencing ADR-0010), documenting the short-circuit-at-first-failure decision, the shared-not-reset `SENSOR_RETRY_LIMIT` budget with the rejected per-sensor-budget alternative, and a brief mention of the `sensors/lint.sh`/bootstrap auto-fix change as the phase's second cost lever; 0015 was still free in `docs/arch/adr/` at implementation time (no renumbering needed). Plan complete — all 6 tasks done. No leak into the main checkout (verified `git status` clean on both worktree `agent/20260805-092634` and `main`, aside from this expected status.md write and a pre-existing unrelated `review.md`).
+
+
+**Run metrics:** 14 driver call(s), $6.5520, session a02ae1f9-3d77-457f-8b14-e94537453e6e

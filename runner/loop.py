@@ -169,20 +169,21 @@ def _main_checkout_dirty_paths(project_root: Path, status_abs: str) -> list[str]
 
 def _run_sensors(cwd: Path) -> list[tuple[str, str]]:
     """
-    Run every sensors/*.sh script in cwd, in sorted order.
+    Run sensors/*.sh scripts in cwd, in sorted order, stopping at the first
+    failure.
 
-    Returns a list of (script_name, combined_output) for each sensor that
-    exited non-zero. Empty list means all sensors passed, or there is no
-    sensors/ directory at all.
+    Returns a single-element list [(script_name, combined_output)] for the
+    first sensor that exits non-zero, or an empty list if all sensors pass
+    (or there is no sensors/ directory at all). Later sensors are not run
+    once one has failed.
     """
-    failures = []
     for script in sorted((cwd / "sensors").glob("*.sh")):
         result = subprocess.run(
             ["sh", str(script)], cwd=cwd, capture_output=True, text=True, check=False
         )
         if result.returncode != 0:
-            failures.append((script.name, result.stdout + result.stderr))
-    return failures
+            return [(script.name, result.stdout + result.stderr)]
+    return []
 
 
 def _run_sensors_with_retry(
@@ -197,9 +198,10 @@ def _run_sensors_with_retry(
     """
     Run sensors, retrying up to SENSOR_RETRY_LIMIT times with a corrective
     worker call in between. Returns (failures, attempt) — failures is the
-    (possibly still non-empty) failures list (does not decide fail-closed
-    itself, that's the caller's job); attempt is the number of retries used,
-    0 when sensors passed on the first try.
+    (possibly still non-empty) failures list, now at most one entry since
+    _run_sensors stops at the first failing sensor per pass (does not decide
+    fail-closed itself, that's the caller's job); attempt is the number of
+    retries used, 0 when sensors passed on the first try.
     """
     failures = _run_sensors(worktree)
     attempt = 0

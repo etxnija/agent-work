@@ -237,6 +237,90 @@ def _run_sensors_with_retry(
     return failures, attempt
 
 
+def _run_review_with_retry(
+    worktree: Path,
+    task_text: str,
+    i: int,
+    total: int,
+    plan_abs: str,
+    agents_abs: str,
+    status_abs: str,
+    driver: AgentDriver,
+    review_critiques: dict[int, str],
+) -> tuple[bool, str, int, int, list[tuple[str, str]]]:
+    """
+    Run the adversarial-review cycle for one task, retrying up to
+    REVIEW_RETRY_LIMIT times with a corrective worker call in between.
+
+    Mutates review_critiques in place exactly as the inline loop it replaces
+    did: popped on approval, set on budget-exhausted or a failed corrective
+    call, left untouched on a sensor regression mid-cycle. Does not decide
+    fail-closed itself — a non-empty failures list is the only fail-closed
+    signal, same contract as _run_sensors_with_retry; the caller must check it.
+
+    Returns (approved, critique, review_attempt, sensor_retry_count, failures).
+    """
+    review_attempt = 0
+    sensor_retry_count = 0
+    while True:
+        diff = _task_diff(worktree)
+        review_prompt = (
+            f"Review this task's diff against the task description and against "
+            f"this repo's AGENTS.md conventions.\n\n"
+            f"Task:\n{task_text}\n\n"
+            f"Diff:\n```diff\n{diff}\n```"
+        )
+        review_result = driver.run_subagent(REVIEWER_AGENT, review_prompt, cwd=worktree)
+        approved, critique = _review_verdict(review_result.text)
+
+        if approved:
+            review_critiques.pop(i, None)
+            return approved, critique, review_attempt, sensor_retry_count, []
+
+        if review_attempt >= REVIEW_RETRY_LIMIT:
+            print(
+                f"[review] Task {i}/{total}: review budget exhausted "
+                f"({REVIEW_RETRY_LIMIT}/{REVIEW_RETRY_LIMIT}) — committing with "
+                f"outstanding critique."
+            )
+            review_critiques[i] = critique
+            return approved, critique, review_attempt, sensor_retry_count, []
+
+        review_attempt += 1
+        print(
+            f"[review] Task {i}/{total}: changes requested "
+            f"(attempt {review_attempt}/{REVIEW_RETRY_LIMIT})."
+        )
+        corrective_prompt = (
+            f"A reviewer requested changes to your last change for this task:\n\n"
+            f"{critique}\n\n"
+            f"Fix them and nothing else."
+        )
+        corrective_result = driver.run(
+            corrective_prompt,
+            context_files=[plan_abs, agents_abs, status_abs],
+            cwd=worktree,
+        )
+        if corrective_result.exit_code != 0:
+            print(
+                f"[error] Corrective worker call failed on task {i}/{total}:\n"
+                f"{corrective_result.text}"
+            )
+            review_critiques[i] = critique
+            return approved, critique, review_attempt, sensor_retry_count, []
+
+        failures, attempt = _run_sensors_with_retry(
+            worktree, i, total, plan_abs, agents_abs, status_abs, driver
+        )
+        sensor_retry_count += attempt
+        if failures:
+            print(
+                f"[error] Sensors still failing on task {i}/{total}: "
+                f"{', '.join(name for name, _ in failures)}."
+            )
+            return approved, critique, review_attempt, sensor_retry_count, failures
+
+
 def _task_diff(worktree: Path) -> str:
     """
     Capture the worktree's current uncommitted changes as a diff string.
@@ -640,65 +724,28 @@ def run_loop(task: str) -> int:
                 return 1  # handle._keep is False → sandbox discards the branch
 
             # ── Adversarial review ──────────────────────────────────────────
-            review_attempt = 0
-            while True:
-                diff = _task_diff(handle.path)
-                review_prompt = (
-                    f"Review this task's diff against the task description and against "
-                    f"this repo's AGENTS.md conventions.\n\n"
-                    f"Task:\n{task_text}\n\n"
-                    f"Diff:\n```diff\n{diff}\n```"
+            approved, critique, review_attempt, review_sensor_retry_count, failures = (
+                _run_review_with_retry(
+                    handle.path,
+                    task_text,
+                    i,
+                    len(tasks),
+                    plan_abs,
+                    agents_abs,
+                    status_abs,
+                    driver,
+                    review_critiques,
                 )
-                review_result = driver.run_subagent(REVIEWER_AGENT, review_prompt, cwd=handle.path)
-                approved, critique = _review_verdict(review_result.text)
+            )
+            sensor_retry_count += review_sensor_retry_count
 
-                if approved:
-                    review_critiques.pop(i, None)
-                    break
-
-                if review_attempt >= REVIEW_RETRY_LIMIT:
-                    print(
-                        f"[review] Task {i}/{len(tasks)}: review budget exhausted "
-                        f"({REVIEW_RETRY_LIMIT}/{REVIEW_RETRY_LIMIT}) — committing with "
-                        f"outstanding critique."
-                    )
-                    review_critiques[i] = critique
-                    break
-
-                review_attempt += 1
+            if failures:
                 print(
-                    f"[review] Task {i}/{len(tasks)}: changes requested "
-                    f"(attempt {review_attempt}/{REVIEW_RETRY_LIMIT})."
+                    f"[error] Sensors still failing on task {i}/{len(tasks)}: "
+                    f"{', '.join(name for name, _ in failures)}."
                 )
-                corrective_prompt = (
-                    f"A reviewer requested changes to your last change for this task:\n\n"
-                    f"{critique}\n\n"
-                    f"Fix them and nothing else."
-                )
-                corrective_result = driver.run(
-                    corrective_prompt,
-                    context_files=[plan_abs, agents_abs, status_abs],
-                    cwd=handle.path,
-                )
-                if corrective_result.exit_code != 0:
-                    print(
-                        f"[error] Corrective worker call failed on task {i}/{len(tasks)}:\n"
-                        f"{corrective_result.text}"
-                    )
-                    review_critiques[i] = critique
-                    break
-
-                failures, attempt = _run_sensors_with_retry(
-                    handle.path, i, len(tasks), plan_abs, agents_abs, status_abs, driver
-                )
-                sensor_retry_count += attempt
-                if failures:
-                    print(
-                        f"[error] Sensors still failing on task {i}/{len(tasks)}: "
-                        f"{', '.join(name for name, _ in failures)}."
-                    )
-                    print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
-                    return 1  # handle._keep is False → sandbox discards the branch
+                print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
+                return 1  # handle._keep is False → sandbox discards the branch
 
             task_narratives.append(
                 {

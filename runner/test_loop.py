@@ -30,6 +30,7 @@ from runner.loop import (
     _parse_tasks,
     _plan_invalid_reason,
     _review_verdict,
+    _run_review_with_retry,
     _run_sensors,
     _run_sensors_with_retry,
     _show_diff_in_editor,
@@ -467,6 +468,85 @@ class TestRunSensorsWithRetry:
         assert failures == []
         assert attempt == 2
         assert driver.run.call_count == 2
+
+
+class TestRunReviewWithRetry:
+    def _args(self, tmp_path, driver, review_critiques):
+        return (
+            tmp_path, "task text", 1, 1,
+            "plan.md", "AGENTS.md", "memory/status.md",
+            driver, review_critiques,
+        )
+
+    def test_approve_on_first_review_no_corrective(self, tmp_path):
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(f"{REVIEW_APPROVED_SIGNAL}\nLooks good.")
+        review_critiques: dict[int, str] = {}
+
+        result = _run_review_with_retry(*self._args(tmp_path, driver, review_critiques))
+
+        assert result == (True, "Looks good.", 0, 0, [])
+        driver.run.assert_not_called()
+        assert 1 not in review_critiques
+
+    def test_changes_requested_once_then_approved(self, tmp_path):
+        review_responses = iter([
+            _ok(f"{REVIEW_CHANGES_SIGNAL}\nFix the thing."),
+            _ok(f"{REVIEW_APPROVED_SIGNAL}\nFixed."),
+        ])
+        driver = MagicMock()
+        driver.run_subagent.side_effect = lambda *a, **k: next(review_responses)
+        driver.run.return_value = _ok()
+        review_critiques: dict[int, str] = {}
+
+        approved, critique, review_attempt, sensor_retry_count, failures = (
+            _run_review_with_retry(*self._args(tmp_path, driver, review_critiques))
+        )
+
+        assert approved is True
+        assert critique == "Fixed."
+        assert review_attempt == 1
+        assert sensor_retry_count == 0
+        assert failures == []
+        assert driver.run.call_count == 1
+        assert 1 not in review_critiques
+
+    def test_changes_requested_through_full_budget_does_not_fail_closed(self, tmp_path):
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(f"{REVIEW_CHANGES_SIGNAL}\nStill not right.")
+        driver.run.return_value = _ok()
+        review_critiques: dict[int, str] = {}
+
+        approved, critique, review_attempt, _sensor_retry_count, failures = (
+            _run_review_with_retry(*self._args(tmp_path, driver, review_critiques))
+        )
+
+        assert approved is False
+        assert critique == "Still not right."
+        assert review_attempt == REVIEW_RETRY_LIMIT
+        assert failures == []
+        assert driver.run.call_count == REVIEW_RETRY_LIMIT
+        assert review_critiques[1] == "Still not right."
+
+    def test_sensor_regression_on_post_corrective_recheck_fails_closed(self, tmp_path):
+        sensors = tmp_path / "sensors"
+        sensors.mkdir()
+        (sensors / "lint.sh").write_text("#!/bin/sh\necho 'regression' >&2\nexit 1\n")
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(f"{REVIEW_CHANGES_SIGNAL}\nFix the thing.")
+        driver.run.return_value = _ok()
+        review_critiques: dict[int, str] = {}
+
+        approved, _critique, review_attempt, _sensor_retry_count, failures = (
+            _run_review_with_retry(*self._args(tmp_path, driver, review_critiques))
+        )
+
+        assert approved is False
+        assert review_attempt == 1
+        assert failures != []
+        assert failures[0][0] == "lint.sh"
+        assert 1 not in review_critiques
 
 
 # ── Planner failures ──────────────────────────────────────────────────────────

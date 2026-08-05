@@ -400,3 +400,39 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 
 **Run metrics:** 14 driver call(s), $6.5520, session a02ae1f9-3d77-457f-8b14-e94537453e6e
+
+## 2026-08-05 — Dead-code-removal plan task 1: remove `_load_agent_body`
+
+### Done
+- Deleted the dead `_load_agent_body(name)` helper (`runner/drivers/claude.py`) — fully superseded by `_load_agent_definition`, which is what `run_subagent` actually calls; `_AGENT_SEARCH_PATHS`, `_parse_frontmatter`, and `_load_agent_definition` left untouched. `ruff`/`pyright` clean on the file; no leak into the main checkout (verified `git status` clean on both worktree `agent/20260805-102124` and `main`, aside from a pre-existing unrelated `review.md`). Task 2 (removing `TestLoadAgentBody` from `test_claude.py`) is separate and not done here.
+
+## 2026-08-05 — Dead-code-removal plan task 2: remove TestLoadAgentBody and its import
+
+### Done
+- No-op — task 1's commit (d57bc19) had already removed `_load_agent_body` from the `runner.drivers.claude` import block and deleted `class TestLoadAgentBody:` in full from `runner/drivers/test_claude.py`; verified via `git show d57bc19` and confirmed `ruff check` clean plus all 27 tests in the file passing, working tree already clean, nothing to commit.
+
+## 2026-08-05 — Dead-code-removal plan task 3: verify nothing else depended on the removed code
+
+### Done
+- Ran full verification (no code changes): `mise run test` (147 passed), `ruff check .` (all checks passed), `pyright` (0 errors/warnings), and a repo-wide grep for `_load_agent_body`/`TestLoadAgentBody` — zero code references remain, only expected mentions in this status.md's own historical log entries. Plan complete — all 3 tasks done.
+
+
+**Run metrics:** 9 driver call(s), $3.3101, session 70a165b9-9931-4aee-bcf9-8e719c3a1e38
+
+## 2026-08-05 — Review-extraction plan task 1: extract `_run_review_with_retry()`
+
+### Done
+- Pure refactor: moved `run_loop()`'s inline adversarial-review `while True` loop (lines 642-701) into `_run_review_with_retry(worktree, task_text, i, total, plan_abs, agents_abs, status_abs, driver, review_critiques) -> tuple[bool, str, int, int, list[tuple[str, str]]]` in `runner/loop.py`, placed right after `_run_sensors_with_retry()`; same `[review]`/`[error]` prints, same `REVIEW_RETRY_LIMIT` check, same corrective-prompt text, same post-corrective `_run_sensors_with_retry()` recheck, and the same in-place `review_critiques` mutation on all four exit paths (pop on approval; set on budget-exhausted or failed corrective call; untouched on sensor-regression). `run_loop()` now calls the helper, accumulates the returned `sensor_retry_count` into its existing running total, and keeps its own `if failures: ...; return 1` check immediately after the call — unchanged in message and behavior. 147 tests passed unmodified (no test needed updating), `ruff check .` and `pyright` both clean; no leak into the main checkout (verified `git status` clean on both worktree `agent/20260805-115349` and `main`, aside from this expected status.md write and the pre-existing unrelated `review.md`).
+
+## 2026-08-05 — Review-extraction plan task 2: `TestRunReviewWithRetry`
+
+### Done
+- Added `TestRunReviewWithRetry` to `runner/test_loop.py`, right after `TestRunSensorsWithRetry` — a bare-`MagicMock`-driver `_args`-style helper and one method per case, calling `_run_review_with_retry()` directly (no `run_loop()`): approve-on-first-review (no corrective `driver.run` call, returns `(True, critique, 0, 0, [])`, no `review_critiques` entry), changes-once-then-approved (one corrective call, entry absent on return), changes-through-the-full-`REVIEW_RETRY_LIMIT`-budget (empty `failures` — does not fail closed — and `review_critiques[i]` set to the critique), and a sensor regression on the post-corrective recheck (real throwaway failing `.sh` script under `tmp_path`, mirroring `TestRunSensorsWithRetry`'s style) returning non-empty `failures` with no `review_critiques` entry. 151 tests passing (up from 147), `ruff check .` and `pyright` both clean; confirmed `TestRunLoopReviewRetry`, `TestRunLoopPerTask`, `TestRunLoopMetricsSummary`, and `TestRunLoopNarrative` all still pass unmodified against task 1's refactored `run_loop()`. No leak into the main checkout (verified `git status` clean on both worktree `agent/20260805-115349` and `main`, aside from this expected status.md write and the pre-existing unrelated `review.md`).
+
+## 2026-08-05 — Review-extraction plan task 3: verify no behavior change
+
+### Done
+- Verification only, no code changes: `mise run test` (151 passed, up from 147 pre-refactor by exactly task 2's 4 new cases, zero regressions), `ruff check .` (all checks passed), `pyright` (0 errors/warnings/informations) all clean; grepped `runner/loop.py`/`runner/test_loop.py` and confirmed a single `while True` review loop (inside `_run_review_with_retry` itself, no leftover duplicate in `run_loop()`) and that every `review_critiques`/`REVIEW_RETRY_LIMIT`/`_run_review_with_retry` reference in the test file targets the new helper, not a stale inline shape. Plan complete — all 3 tasks done.
+
+
+**Run metrics:** 9 driver call(s), $6.1890, session 71a6c487-8156-4885-9d4f-aac22fdaf3c6

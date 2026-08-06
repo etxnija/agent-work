@@ -11,9 +11,10 @@ class GitWorktreeSandbox(SandboxRuntime):
     """
     Git-worktree isolation: each worker run gets its own branch + temporary worktree.
 
-    On success (handle.keep() called): worktree directory is removed, branch is kept
-    so Phase 3 can merge it back.
-    On failure: both the worktree and branch are discarded — cleanup is a one-liner.
+    The worktree directory is always removed on exit. The branch is kept only if
+    handle.keep() was called — on success, or on a sensor-retry-exhausted failure
+    that still wants completed prior-task commits preserved — otherwise it's
+    discarded via `git branch -D`.
     """
 
     @contextmanager

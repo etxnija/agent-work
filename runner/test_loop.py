@@ -52,10 +52,12 @@ class _FakeBranchSandbox:
     def __init__(self, path: Path, branch: str) -> None:
         self._path = path
         self._branch = branch
+        self.handle: WorkspaceHandle | None = None
 
     @contextmanager
     def workspace(self, project_root: Path):
-        yield WorkspaceHandle(path=self._path, branch=self._branch)
+        self.handle = WorkspaceHandle(path=self._path, branch=self._branch)
+        yield self.handle
 
 
 def _make_project(tmp_path: Path) -> Path:
@@ -833,18 +835,67 @@ class TestRunLoopSensorRetry:
         driver.run.side_effect = self._worker_ok(tmp_path)
         gate = MagicMock()
         gate.request.return_value = True
+        fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
              patch("runner.loop._run_sensors", return_value=[("lint.sh", "still bad")]), \
              patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print"):
+             patch("builtins.print") as mock_print:
             code = run_loop("task")
 
         assert code == 1
         assert driver.run.call_count == 1 + SENSOR_RETRY_LIMIT  # worker + every corrective retry
         mock_commit.assert_not_called()
+        assert fake_sandbox.handle is not None
+        assert fake_sandbox.handle._keep is True
+        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
+        assert any(
+            "agent/fake-branch" in line and "0 completed task(s)" in line for line in printed
+        )
+
+    def test_second_task_sensor_exhaustion_preserves_first_tasks_commit(
+        self, tmp_path, monkeypatch
+    ):
+        """Two-task plan: task 1 completes, task 2's sensors fail every retry —
+        the branch is preserved and the recovery message names 1 completed task."""
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = _plan_then_approve
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+        fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
+
+        sensors_call_count = 0
+
+        def sensors_side_effect(cwd):
+            nonlocal sensors_call_count
+            sensors_call_count += 1
+            if sensors_call_count == 1:
+                return []  # task 1 passes on the first try
+            return [("lint.sh", "still bad")]  # task 2 fails every check
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
+             patch("runner.loop._run_sensors", side_effect=sensors_side_effect), \
+             patch("runner.loop._commit_task") as mock_commit, \
+             patch("builtins.print") as mock_print:
+            code = run_loop("task")
+
+        assert code == 1
+        mock_commit.assert_called_once()  # task 1's commit went through
+        assert fake_sandbox.handle is not None
+        assert fake_sandbox.handle._keep is True
+        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
+        assert any(
+            "agent/fake-branch" in line and "1 completed task(s)" in line for line in printed
+        )
 
 
 # ── Review-cycle wiring ───────────────────────────────────────────────────────
@@ -972,6 +1023,7 @@ class TestRunLoopReviewRetry:
         driver.run.side_effect = self._worker_ok(tmp_path)
         gate = MagicMock()
         gate.request.return_value = True
+        fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
 
         sensors_call_count = 0
 
@@ -984,14 +1036,20 @@ class TestRunLoopReviewRetry:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
              patch("runner.loop._run_sensors", side_effect=sensors_side_effect), \
              patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print"):
+             patch("builtins.print") as mock_print:
             code = run_loop("task")
 
         assert code == 1
         mock_commit.assert_not_called()
+        assert fake_sandbox.handle is not None
+        assert fake_sandbox.handle._keep is True
+        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
+        assert any(
+            "agent/fake-branch" in line and "0 completed task(s)" in line for line in printed
+        )
 
     def test_sensor_retries_accumulate_across_initial_and_review_corrective_calls(
         self, tmp_path, monkeypatch

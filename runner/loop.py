@@ -766,7 +766,14 @@ def run_loop(task: str) -> int:
                     f"{', '.join(name for name, _ in failures)}."
                 )
                 print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
-                return 1  # handle._keep is False → sandbox discards the branch
+                handle.keep()
+                if handle.branch:
+                    print(
+                        f"[loop] Branch '{handle.branch}' preserved — {i - 1} completed "
+                        f"task(s) are not lost. Inspect with `git log {handle.branch} --oneline`, "
+                        f"or merge manually with `git merge --squash {handle.branch} && git commit`."
+                    )
+                return 1  # handle.keep() called above → branch preserved for manual recovery
 
             # ── Adversarial review ──────────────────────────────────────────
             approved, critique, review_attempt, review_sensor_retry_count, failures = (
@@ -790,7 +797,14 @@ def run_loop(task: str) -> int:
                     f"{', '.join(name for name, _ in failures)}."
                 )
                 print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
-                return 1  # handle._keep is False → sandbox discards the branch
+                handle.keep()
+                if handle.branch:
+                    print(
+                        f"[loop] Branch '{handle.branch}' preserved — {i - 1} completed "
+                        f"task(s) are not lost. Inspect with `git log {handle.branch} --oneline`, "
+                        f"or merge manually with `git merge --squash {handle.branch} && git commit`."
+                    )
+                return 1  # handle.keep() called above → branch preserved for manual recovery
 
             task_narratives.append(
                 {

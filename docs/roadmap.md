@@ -177,8 +177,8 @@ Goal: the loop learns across sessions and recovers from known failure modes with
 | Interactive merge prompt after successful run (y/n fast-forward into main) | ✅ |
 | Merge prompt opens the branch's diff in a floating Zellij pane (`$EDITOR`) before asking y/n — personal workflow convenience, no-op outside Zellij | ✅ |
 | PR creation for review | pending |
-| **Keep the branch on task failure instead of `git branch -D`** — today any failed task discards every already-completed task's commits on that run, not just the failing one (`runner/sandbox/worktree.py`) | pending |
-| `agent loop --resume` — detect an existing `agent/*` branch with completed task commits, skip them, continue from the first incomplete task | pending — blocked by the item above |
+| **Keep the branch on task failure instead of `git branch -D`** — `handle.keep()` is now called (with a `[loop]` message naming the branch and completed-task count) when sensors are still failing after `SENSOR_RETRY_LIMIT` is exhausted, at both the post-worker and post-review-corrective sensor checks; a hard worker-execution failure (non-zero exit) still discards the branch, unchanged — a narrower fix than "any task failure," by design (`runner/loop.py`, `runner/sandbox/worktree.py`) | ✅ |
+| `agent loop --resume` — detect an existing `agent/*` branch with completed task commits, skip them, continue from the first incomplete task | pending — separate follow-on, still blocked on other design questions (not this dependency) |
 | `agent loop --plan <path>` (or auto-detected prompt) — approve/execute an existing `plan.md` without re-running the planner | pending |
 
 ---

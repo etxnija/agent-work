@@ -1,0 +1,11 @@
+[run]
+source = .
+omit =
+    */test_*.py
+    */conftest.py
+    */.venv/*
+    */venv/*
+    */__pycache__/*
+    */.git/*
+    */logs/*
+    */*.egg-info/*

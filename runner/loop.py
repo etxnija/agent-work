@@ -582,23 +582,29 @@ def _offer_merge(
 
 def _update_coverage_baseline(project_root: Path) -> None:
     """
-    Refresh .coverage-baseline from main's current whole-repo coverage %.
+    Refresh .coverage-baseline from a fresh run of the project's own
+    sensors/test.sh against main.
 
-    Best-effort: a failure here must not undo an already-successful merge,
-    so it warns and leaves the existing baseline (if any) untouched rather
-    than raising.
+    Language-agnostic: delegates entirely to whatever sensors/test.sh
+    the project's bootstrapped language preset put in place, and only
+    looks for a coverage.json report it may have produced. Best-effort
+    — a failure here, or the absence of a coverage-producing sensor,
+    must not undo an already-successful merge, so it warns/skips and
+    leaves the existing baseline (if any) untouched rather than raising.
     """
+    test_sh = project_root / "sensors" / "test.sh"
     coverage_json = project_root / "coverage.json"
 
-    result = subprocess.run(
-        ["pytest", "--cov=runner", "--cov=bootstrap", "--cov=cli", "--cov-report=json"],
-        cwd=project_root,
-        capture_output=True,
-        text=True,
-        check=False,
+    if not test_sh.exists():
+        print("[coverage] Baseline update skipped: no sensors/test.sh in this project.")
+        return
+
+    subprocess.run(
+        ["sh", str(test_sh)], cwd=project_root, capture_output=True, text=True, check=False
     )
-    if result.returncode != 0 or not coverage_json.exists():
-        print("[coverage] Baseline update skipped: coverage run failed or produced no report.")
+
+    if not coverage_json.exists():
+        print("[coverage] Baseline update skipped: sensors/test.sh produced no coverage report.")
         return
 
     percent_covered = json.loads(coverage_json.read_text())["totals"]["percent_covered"]

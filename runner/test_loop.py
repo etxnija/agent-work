@@ -1654,8 +1654,11 @@ class TestBranchCommits:
 
 class TestUpdateCoverageBaseline:
     def test_successful_run_writes_baseline_and_commits(self, tmp_path, monkeypatch):
+        (tmp_path / "sensors").mkdir()
+        (tmp_path / "sensors" / "test.sh").write_text("#!/bin/sh\n")
+
         def fake_run(cmd, cwd, **kwargs):
-            if cmd[0] == "pytest":
+            if cmd[0] == "sh":
                 (tmp_path / "coverage.json").write_text(
                     json.dumps({"totals": {"percent_covered": 87.654}})
                 )
@@ -1673,18 +1676,32 @@ class TestUpdateCoverageBaseline:
         assert ["git", "add"] in commands
         assert ["git", "commit"] in commands
 
-    def test_failed_pytest_run_leaves_existing_baseline_untouched(self, tmp_path, monkeypatch):
+    def test_nonzero_exit_from_test_sh_does_not_block_baseline_update(self, tmp_path, monkeypatch):
+        (tmp_path / "sensors").mkdir()
+        (tmp_path / "sensors" / "test.sh").write_text("#!/bin/sh\n")
         (tmp_path / ".coverage-baseline").write_text("42.0")
 
-        mock_run = MagicMock(return_value=MagicMock(returncode=1))
+        def fake_run(cmd, cwd, **kwargs):
+            if cmd[0] == "sh":
+                (tmp_path / "coverage.json").write_text(
+                    json.dumps({"totals": {"percent_covered": 55.0}})
+                )
+                return MagicMock(returncode=1)
+            return MagicMock(returncode=0)
+
+        mock_run = MagicMock(side_effect=fake_run)
         monkeypatch.setattr(subprocess, "run", mock_run)
 
         _update_coverage_baseline(tmp_path)
 
-        assert (tmp_path / ".coverage-baseline").read_text() == "42.0"
-        assert all(call.args[0][0] != "git" for call in mock_run.call_args_list)
+        assert (tmp_path / ".coverage-baseline").read_text() == "55.0"
+        commands = [call.args[0][:2] for call in mock_run.call_args_list]
+        assert ["git", "add"] in commands
+        assert ["git", "commit"] in commands
 
     def test_missing_coverage_json_after_success_behaves_like_failure(self, tmp_path, monkeypatch):
+        (tmp_path / "sensors").mkdir()
+        (tmp_path / "sensors" / "test.sh").write_text("#!/bin/sh\n")
         (tmp_path / ".coverage-baseline").write_text("42.0")
 
         mock_run = MagicMock(return_value=MagicMock(returncode=0))
@@ -1694,6 +1711,33 @@ class TestUpdateCoverageBaseline:
 
         assert (tmp_path / ".coverage-baseline").read_text() == "42.0"
         assert all(call.args[0][0] != "git" for call in mock_run.call_args_list)
+
+    def test_no_test_sh_skips_without_running_anything(self, tmp_path, monkeypatch):
+        mock_run = MagicMock()
+        monkeypatch.setattr(subprocess, "run", mock_run)
+
+        _update_coverage_baseline(tmp_path)
+
+        assert not (tmp_path / ".coverage-baseline").exists()
+        mock_run.assert_not_called()
+
+    def test_real_project_agnostic_test_sh_writes_baseline_and_commits(self, tmp_path):
+        _init_repo(tmp_path)
+        (tmp_path / "sensors").mkdir()
+        test_sh = tmp_path / "sensors" / "test.sh"
+        test_sh.write_text(
+            "#!/bin/sh\necho '{\"totals\": {\"percent_covered\": 73.2}}' > coverage.json\n"
+        )
+        test_sh.chmod(0o755)
+
+        _update_coverage_baseline(tmp_path)
+
+        assert (tmp_path / ".coverage-baseline").read_text() == "73.2"
+        assert not (tmp_path / "coverage.json").exists()
+
+        log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
+                              capture_output=True, text=True, check=False).stdout
+        assert "Update coverage baseline" in log
 
 
 class TestOfferMerge:

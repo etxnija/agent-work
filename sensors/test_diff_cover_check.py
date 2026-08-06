@@ -99,3 +99,12 @@ class TestDiffCoverCheck:
         assert (result.returncode != 0) == expect_failure
         for substring in expected_substrings:
             assert substring in result.stdout
+
+    def test_same_branch_empty_diff_passes(self, tmp_path):
+        """`_update_coverage_baseline()` runs this check with HEAD already on
+        `main`, so the diff against `--compare-branch=main` is always empty."""
+        _init_repo(tmp_path)
+        coverage_xml = _COVERAGE_XML_TEMPLATE.format(new_lines_hits=1)
+        result = _run_diff_cover(tmp_path, coverage_xml)
+        assert result.returncode == 0
+        assert "No lines with coverage information in this diff." in result.stdout

@@ -109,6 +109,20 @@ MISE_TOML_TEMPLATE = """\
 python = "{python_version}"
 """
 
+COVERAGERC_TEMPLATE = """\
+[run]
+source = .
+omit =
+    */test_*.py
+    */conftest.py
+    */.venv/*
+    */venv/*
+    */__pycache__/*
+    */.git/*
+    */logs/*
+    */*.egg-info/*
+"""
+
 # Base allow list (all projects). Language-specific commands added below.
 _SETTINGS_ALLOW_BASE = [
     "Bash(mise run*)",
@@ -152,7 +166,7 @@ SENSORS = {
     },
     "python": {
         "lint.sh": "#!/bin/sh\nset -e\nruff check --fix .\n",
-        "test.sh": "#!/bin/sh\nset -e\npytest --cov=runner --cov=bootstrap --cov=cli --cov-report=xml --cov-report=json --cov-report=term-missing\ndiff-cover coverage.xml --compare-branch=main --fail-under=100\npython3 sensors/_coverage_floor.py\n",
+        "test.sh": "#!/bin/sh\nset -e\npytest --cov=. --cov-report=xml --cov-report=json --cov-report=term-missing\ndiff-cover coverage.xml --compare-branch=main --fail-under=100\npython3 sensors/_coverage_floor.py\n",
         "lsp.sh": "#!/bin/sh\nset -e\npyright --outputjson\n",
         "_coverage_floor.py": "#!/usr/bin/env python3\n\"\"\"Check 2: whole-repo coverage regression floor vs. main's cached baseline.\"\"\"\n\nimport json\nimport sys\nfrom pathlib import Path\n\nTOLERANCE = 1.0\n\n\ndef main() -> int:\n    current = json.loads(Path(\"coverage.json\").read_text())[\"totals\"][\"percent_covered\"]\n\n    baseline_path = Path(\".coverage-baseline\")\n    if not baseline_path.exists():\n        print(\"[coverage] no baseline yet, skipping\")\n        return 0\n\n    baseline = float(baseline_path.read_text().strip())\n    drop = baseline - current\n\n    if drop > TOLERANCE:\n        print(\n            f\"Whole-repo coverage dropped from {baseline:.2f}% to {current:.2f}% \"\n            f\"(more than {TOLERANCE} point tolerance vs main).\"\n        )\n        return 1\n\n    print(f\"Whole-repo coverage: {current:.2f}% (baseline {baseline:.2f}%)\")\n    return 0\n\n\nif __name__ == \"__main__\":\n    sys.exit(main())\n",
     },
@@ -246,6 +260,13 @@ def bootstrap(project_dir: Path, lang: str) -> None:
             MISE_TOML_TEMPLATE.format(python_version=_harness_python_version())
         )
         print(f"  created {mise_toml.relative_to(project_dir)}")
+
+    # .coveragerc — project-agnostic coverage source/omit config (pytest-cov only)
+    if lang == "python":
+        coveragerc = project_dir / ".coveragerc"
+        if not coveragerc.exists():
+            coveragerc.write_text(COVERAGERC_TEMPLATE)
+            print(f"  created {coveragerc.relative_to(project_dir)}")
 
     # Sensor scripts
     scripts = SENSORS.get(lang, SENSORS[""])

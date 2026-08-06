@@ -38,3 +38,12 @@ re-running the full suite against `main` inside every task.
   no-op (prints a notice, exits 0) until the first merge produces one.
 - The 1-point tolerance is hardcoded in `_coverage_floor.py`, not
   configurable per project or per run.
+
+## Addendum (2026-08-06)
+
+The original implementation hardcoded this repo's own package names
+(`runner`, `bootstrap`, `cli`), breaking portability to any other
+bootstrapped project (Python or otherwise). Fixed via a project-agnostic
+`.coveragerc` (`source = .` + omissions) for the `--cov=.` invocations, and
+by having `_update_coverage_baseline()` delegate to the project's own
+`sensors/test.sh` instead of hardcoding a pytest command.

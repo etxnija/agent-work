@@ -579,3 +579,26 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 
 **Run metrics:** 8 driver call(s), $3.8458, session b776ea9b-0246-49e4-bd7e-65bf7b05abcb
+
+## 2026-08-06 — Refactor-sub-agent plan task 1: `agents/refactor.md`
+
+### Done
+- Added `agents/refactor.md` (mirrors `agents/reviewer.md`'s frontmatter/body shape): `tools: Read, Glob, Grep` (no Write/Bash, no `model:` field — no cost data yet to justify picking one), reads the target file plus its adjacent test file, uses Glob/Grep to check consistency with surrounding codebase patterns, flags concrete drift (dead code, single-use-but-reusable helpers, inconsistent naming, multi-responsibility functions/modules) with file/line citations, explicitly excludes stylistic preferences and full rewrites (deferred to a future Architecture agent), never suggests code inline, and ends with a plain-language findings summary — no pass/fail marker line, since this agent's output isn't fed into a retry loop.
+
+## 2026-08-06 — Refactor-sub-agent plan task 2: `cmd_refactor` handler
+
+### Done
+- Added `cmd_refactor(args) -> int` to `cli.py` (lazy imports of `Path`/`get_driver`, matching `cmd_bootstrap`/`cmd_loop`'s pattern): resolves `args.path` via `Path(args.path)` (no `.resolve()`), builds a prompt naming the target path, calls `get_driver().run_subagent("refactor", prompt, cwd=Path.cwd())`, prints `[error] {result.text}` and returns 1 on non-zero `exit_code`, else prints `result.text` and returns 0; not yet wired into argparse (task 3). 172 tests passing (unchanged — no new tests yet, that's task 4), `ruff`/`pyright` both clean. Caught the worktree-vs-main-checkout leak (Edit initially landed in `/Users/nils/source/agent-work` instead of the worktree `agent/20260806-125210`) — reverted via `git checkout -- cli.py` on `main` and reapplied in the correct worktree path before finishing; `main` verified clean of it.
+
+## 2026-08-06 — Refactor-sub-agent plan task 3: register the refactor subcommand in argparse
+
+### Done
+- No-op — task 2's commit (e7f1a39) had already added the `refactor` subparser (positional `path`, matching help text) and the `case "refactor": sys.exit(cmd_refactor(args))` branch to `cli.py`'s `main()`, contrary to that task's own status.md note claiming this was left for task 3. Verified via `git show e7f1a39 -- cli.py`; `ruff check cli.py`/`pyright cli.py` both clean and `test_cli.py`'s 5 tests pass, working tree already clean, nothing to commit.
+
+## 2026-08-06 — Refactor-sub-agent plan task 4: `test_cli.py` + `pyproject.toml` testpaths
+
+### Done
+- No-op — task 2's commit (e7f1a39) had already created `test_cli.py` with a `TestCmdRefactor` class covering all four planned cases (mocking `runner.drivers.get_driver`, matching the lazy-import-inside-`cmd_refactor` pattern) plus a bonus `TestMainRefactorWiring` test for the argparse dispatch, and `pyproject.toml`'s `testpaths` already included `"."`. Verified via `git show e7f1a39 -- test_cli.py pyproject.toml`; full suite (177 tests, up from 172 pre-task after this session's own `python3 -m pytest -q`) passes, `ruff check .`/`pyright` both clean, working tree already clean, nothing to commit. Plan complete — all 4 tasks done.
+
+
+**Run metrics:** 13 driver call(s), $6.2622, session 9df08d1e-2472-4f40-b30b-bbe77ccfe4f7

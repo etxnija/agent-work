@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import cli
-from cli import cmd_refactor
+from cli import cmd_architect, cmd_refactor
 from runner.drivers.base import AgentResult
 
 
@@ -68,3 +68,39 @@ class TestMainRefactorWiring:
         assert exc_info.value.code == 0
         mock_cmd_refactor.assert_called_once()
         assert mock_cmd_refactor.call_args.args[0].path == "some/file.py"
+
+
+class TestCmdArchitect:
+    def test_calls_run_architecture_review_with_path_and_cwd(self):
+        with patch("runner.architecture.run_architecture_review", return_value=0) as mock_run:
+            cmd_architect(argparse.Namespace(path="some/file.py"))
+
+        mock_run.assert_called_once_with("some/file.py", Path.cwd())
+
+    def test_returns_result_of_run_architecture_review(self):
+        with patch("runner.architecture.run_architecture_review", return_value=0) as mock_run:
+            result = cmd_architect(argparse.Namespace(path="some/file.py"))
+
+        assert result == 0
+        mock_run.assert_called_once()
+
+    def test_resolves_path_relative_to_cwd(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        with patch("runner.architecture.run_architecture_review", return_value=0) as mock_run:
+            cmd_architect(argparse.Namespace(path="relative/target.py"))
+
+        mock_run.assert_called_once_with("relative/target.py", tmp_path)
+
+
+class TestMainArchitectWiring:
+    def test_architect_subcommand_dispatches_to_cmd_architect(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["agent", "architect", "some/file.py"])
+        mock_cmd_architect = MagicMock(return_value=0)
+        monkeypatch.setattr(cli, "cmd_architect", mock_cmd_architect)
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+        assert exc_info.value.code == 0
+        mock_cmd_architect.assert_called_once()
+        assert mock_cmd_architect.call_args.args[0].path == "some/file.py"

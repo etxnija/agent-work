@@ -602,3 +602,37 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 
 **Run metrics:** 13 driver call(s), $6.2622, session 9df08d1e-2472-4f40-b30b-bbe77ccfe4f7
+
+
+## 2026-08-06 — Architecture-agent plan task 4: `runner/architecture.py` — verdict parser and constants
+
+### Done
+- Added `runner/architecture.py` (no imports from `runner/loop.py`): constants `ARCHITECT_AGENT`, `ARCH_CONVERGED_SIGNAL`, `ARCH_REVISED_SIGNAL`, `ARCH_MAX_ROUNDS = 3`, `ARCH_RECOMMENDATION_FILE`; `_architecture_verdict(text) -> tuple[bool, str]` copying `_review_verdict`'s pattern (converged/revised/fallback-never-silently-converges). Imports `Path`, `get_driver`, `AgentResult`, `Metrics`, `_MeteredDriver` per the plan for task 5's `run_architecture_review` to consume — expected transitional `ruff` F401 on all five until then, same documented pattern as prior multi-task plans in this log. 177 tests pass unmodified (verdict-parser tests are task 6), `pyright` clean. No leak into the main checkout (verified `git status` clean on `main`, aside from this expected status.md write).
+
+## 2026-08-06 — Architecture-agent plan task 6: `runner/test_architecture.py` — verdict parser tests
+
+### Done
+- No-op — task 5's commit (aa9fd41) had already created `runner/test_architecture.py` with `TestArchitectureVerdict` (the 3 planned cases: converged-with-recommendation, revised-with-new-claim, neither-marker-present-falls-back-to-not-converged) plus a bonus `TestRunArchitectureReview` class (task 7's scope), contrary to that task's own status.md note claiming no tests were added yet. Verified via `git log --oneline -- runner/test_architecture.py` (single commit, aa9fd41); all 7 tests in the file pass, `ruff check`/`pyright` both clean, working tree already clean, nothing to commit.
+
+## 2026-08-06 — Architecture-agent plan task 9: `TestCmdArchitect` + `TestMainArchitectWiring` in `test_cli.py`
+
+### Done
+- No-op — task 8's commit (7c5d6b0) had already added `TestCmdArchitect` (3 cases: calls `run_architecture_review` with target + `Path.cwd()`, returns its result, resolves path relative to cwd via `monkeypatch.chdir`) and `TestMainArchitectWiring` (1 case: `sys.argv = ["agent", "architect", ...]` dispatches to `cmd_architect`) to `test_cli.py`, exactly mirroring `TestCmdRefactor`/`TestMainRefactorWiring`, contrary to that task's own status.md note claiming CLI wiring tests were left for this task. Verified via `git log --oneline -5 -- test_cli.py` (single commit, 7c5d6b0) and `git status --short test_cli.py` (clean); ran the file directly (9 passed) and the full suite (188 passed, up from 184), `ruff check .` and `pyright` both clean, working tree already clean, nothing to commit.
+
+## 2026-08-06 — Widen-architect-scope plan task 1: CLAIM+EXTRACT review-dimensions checklist
+
+### Done
+- Expanded `agents/architect.md`'s CLAIM+EXTRACT mode instructions: replaced the single narrow sentence with a 7-dimension survey checklist (cohesion, coupling/dependency direction, abstraction fit both directions, design-pattern fit — explicitly a level up from the Refactor agent's consistency-only check, failure-handling design, testability, domain fit) plus a breadth-before-depth closing instruction to survey broadly before narrowing to one claim, so the agent's first real run (which anchored on one file/`runner/loop.py` instead of surveying the whole target) doesn't recur; DOUBT/RECONCILE modes and `runner/architecture.py` untouched per plan. Caught the worktree-vs-main-checkout leak (Edit initially landed in `/Users/nils/source/agent-work` instead of the actual worktree) — reverted via `git checkout -- agents/architect.md` on `main` and reapplied in the correct worktree path before finishing; `main` verified clean of it.
+
+## 2026-08-06 — Widen-architect-scope plan task 2: breadth-before-depth instruction
+
+### Done
+- No-op — task 1's commit had already bundled the breadth-before-depth closing paragraph (`agents/architect.md` lines 46-54: survey broadly across the dimensions first, identify every plausible finding, select only the single most significant/best-evidenced one, don't default to the largest/most-recent/most-salient file, still exactly ONE claim) into the same edit as the review-dimensions checklist, contrary to task 1's own status.md note describing it as a separate task; verified by reading the file directly. No leak into the main checkout (verified `git status` clean on `main`, aside from this expected status.md write).
+
+## 2026-08-06 — Widen-architect-scope plan task 3: verify no test breakage
+
+### Done
+- Ran `python3 -m pytest runner/test_architecture.py test_cli.py -q` — 16 passed, confirming no test asserts against `agents/architect.md`'s exact content. Plan complete — all 3 tasks done. No code changes needed; no leak into the main checkout (verified `git status` clean on `main`, aside from this expected status.md write and the pre-existing unrelated untracked `architecture-recommendation.md`).
+
+
+**Run metrics:** 11 driver call(s), $4.3365, session 481a84b7-36eb-4d3f-a180-afd392f05831

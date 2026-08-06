@@ -17,13 +17,13 @@ import os
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .drivers import get_driver
-from .drivers.base import AgentDriver, AgentResult
+from .drivers.base import AgentDriver
 from .gates import get_gate
+from .metrics import Metrics, _MeteredDriver
 from .sandbox import get_sandbox
 
 PLAN_FILE = "plan.md"
@@ -39,45 +39,6 @@ REVIEWER_AGENT = "reviewer"
 REVIEW_APPROVED_SIGNAL = "REVIEW: APPROVED"
 REVIEW_CHANGES_SIGNAL = "REVIEW: CHANGES REQUESTED"
 REVIEW_RETRY_LIMIT = 2
-
-
-# ── Metrics ───────────────────────────────────────────────────────────────────
-
-@dataclass
-class Metrics:
-    calls: int = 0
-    cost_usd: float = 0.0
-    last_session_id: str | None = None
-
-    def record(self, result: AgentResult) -> None:
-        self.calls += 1
-        if result.cost_usd is not None:
-            self.cost_usd += result.cost_usd
-        if result.session_id is not None:
-            self.last_session_id = result.session_id
-
-
-class _MeteredDriver(AgentDriver):
-    """Wraps an AgentDriver, recording every call into a shared Metrics instance."""
-
-    def __init__(self, inner: AgentDriver, metrics: Metrics) -> None:
-        self._inner = inner
-        self._metrics = metrics
-
-    def run(
-        self,
-        prompt: str,
-        context_files: list[str] | None = None,
-        cwd: Path | None = None,
-    ) -> AgentResult:
-        result = self._inner.run(prompt, context_files=context_files, cwd=cwd)
-        self._metrics.record(result)
-        return result
-
-    def run_subagent(self, agent_name: str, prompt: str, cwd: Path | None = None) -> AgentResult:
-        result = self._inner.run_subagent(agent_name, prompt, cwd=cwd)
-        self._metrics.record(result)
-        return result
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

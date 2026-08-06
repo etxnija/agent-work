@@ -47,6 +47,11 @@ def cmd_refactor(args) -> int:
     return 0
 
 
+def cmd_architect(args) -> int:
+    from runner.architecture import run_architecture_review
+    return run_architecture_review(args.path, Path.cwd())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="agent",
@@ -78,6 +83,12 @@ def main() -> None:
     )
     rp.add_argument("path", help="File or directory to review")
 
+    ap = sub.add_parser(
+        "architect",
+        help="Review a file or module's architectural shape",
+    )
+    ap.add_argument("path", help="File or module to review")
+
     args = parser.parse_args()
 
     match args.command:
@@ -87,6 +98,8 @@ def main() -> None:
             sys.exit(cmd_loop(args))
         case "refactor":
             sys.exit(cmd_refactor(args))
+        case "architect":
+            sys.exit(cmd_architect(args))
 
 
 if __name__ == "__main__":

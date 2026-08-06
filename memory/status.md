@@ -538,3 +538,26 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 
 **Run metrics:** 33 driver call(s), $17.3415, session 8466d71a-8e54-4e3b-aa71-c822d299157f
+
+## 2026-08-06 — Keep-branch-on-failure plan task 1: preserve the branch on sensor-retry-exhausted failure
+
+### Done
+- In `run_loop()` (`runner/loop.py`), added `handle.keep()` plus a guarded `[loop] Branch '{branch}' preserved…` recovery-guidance print immediately before both `return 1`s that fire when `_run_sensors_with_retry()` returns non-empty `failures` (the post-worker check at line ~769 and the post-review-corrective recheck at line ~793), and updated their trailing comments to `# handle.keep() called above → branch preserved for manual recovery`; the distinct worker-execution-failure `return 1` (line 750) is intentionally left untouched, still discarding the branch. 167 tests pass unmodified (test updates are plan task 3, not this task), `ruff check .` and `pyright` both clean. No leak into the main checkout (verified `git status` clean on `main`).
+
+## 2026-08-06 — Keep-branch-on-failure plan task 2: update `GitWorktreeSandbox`'s stale docstring
+
+### Done
+- Rewrote `GitWorktreeSandbox`'s class docstring (`runner/sandbox/worktree.py`) to state the actual condition (worktree always removed; branch kept only if `handle.keep()` was called — success or, as of task 1, a sensor-retry-exhausted failure — else discarded via `git branch -D`), replacing the stale "failure always discards both" wording; no code changed, `workspace()`'s logic is untouched. `ruff check` clean; no leak into the main checkout (verified `git status` clean on `main`).
+
+## 2026-08-06 — Keep-branch-on-failure plan task 3: test coverage for branch preservation
+
+### Done
+- Found task 1's commit had already retargeted `TestRunLoopSensorRetry.test_sensors_fail_every_retry_fails_closed_without_commit` and `TestRunLoopReviewRetry.test_sensor_regression_after_review_corrective_still_fails_closed` onto `_FakeBranchSandbox` (including adding `self.handle` to that fixture) with assertions on `fake_sandbox.handle._keep is True` and the printed `"agent/fake-branch"` / `"0 completed task(s)"` recovery message, contrary to that task's own status.md note claiming this was task 3's job. Added the one piece still missing: `test_second_task_sensor_exhaustion_preserves_first_tasks_commit` in `TestRunLoopSensorRetry` (`runner/test_loop.py`), using the existing two-task `MINIMAL_PLAN` fixture — task 1's sensors pass and it commits, task 2's sensors fail every retry — asserting `mock_commit.assert_called_once()` (task 1 preserved), `fake_sandbox.handle._keep is True`, and the printed message contains `"1 completed task(s)"`. 168 tests passing (up from 167), `ruff check .` and `pyright` both clean; no leak into the main checkout (verified `git status` clean on `main`, aside from this expected status.md write).
+
+## 2026-08-06 — Keep-branch-on-failure plan task 4: sync docs/roadmap.md's Phase 3 table
+
+### Done
+- Flipped `docs/roadmap.md`'s "Keep the branch on task failure" row from `pending` to ✅, reworded to name the actual scope landed (sensor-retry-exhausted failures only, via `handle.keep()` + `[loop]` message; hard worker-execution failures still discard the branch, unchanged); reworded the next row (`agent loop --resume`) from "blocked by the item above" to "separate follow-on, still blocked on other design questions (not this dependency)" since that literal blocking dependency is now resolved. Plan complete — all 4 tasks done. Mechanical doc sync only, no design changes. No leak into the main checkout (verified `git status` clean on `main`, aside from this expected status.md write).
+
+
+**Run metrics:** 10 driver call(s), $6.1702, session 5e4d822c-7268-4d8e-9b9e-8d79ef1a5f26

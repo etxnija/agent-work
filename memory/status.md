@@ -561,3 +561,21 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 
 **Run metrics:** 10 driver call(s), $6.1702, session 5e4d822c-7268-4d8e-9b9e-8d79ef1a5f26
+
+## 2026-08-06 — Model-routing plan task 1: parse `model` in `_load_agent_definition`, return 3-tuple
+
+### Done
+- Changed `_load_agent_definition()` (`runner/drivers/claude.py`) to also return the `model:` frontmatter field as a third tuple element (`(body, tools, model)`, not-found path `(None, [], None)`), updated its docstring/type hint, and updated `run_subagent()`'s call site to unpack 3-tuples without using `model` yet (task 2's job). Updated `runner/drivers/test_claude.py`'s three existing `TestLoadAgentDefinition` cases to unpack 3-tuples and assert `model is None`, and added `test_no_model_field_returns_none` + `test_model_field_returned`. 170 tests passing (up from 168), `pyright` clean; `ruff check .` has one expected transitional `RUF059` (`model` unused in `run_subagent()`) matching the plan's own note that task 2 consumes it — same documented-fallout pattern used throughout prior multi-task plans in this log. No leak into the main checkout (verified `git status` clean on `main`, aside from this expected status.md write).
+
+## 2026-08-06 — Model-routing plan task 2: append `--model` in `run_subagent()` when declared
+
+### Done
+- In `run_subagent()` (`runner/drivers/claude.py`), consumed the `model` value already threaded through by task 1: after the `tools` if/else block builds `cmd`, added `if model: cmd += ["--model", model]`, leaving `cmd` unchanged when `model` is `None`; updated the docstring to mention the optional `model:` frontmatter field. Added `test_appends_model_flag_when_model_declared` and `test_no_model_field_omits_model_flag` to `TestClaudeDriverRunSubagent` (`runner/drivers/test_claude.py`). 172 tests passing (up from 170), `ruff`/`pyright` both clean. No leak into the main checkout (verified `git status` clean on `main`, aside from this expected status.md write).
+
+## 2026-08-06 — Model-routing plan task 3: enable cheap-model routing for the reviewer
+
+### Done
+- Added `model: claude-haiku-4-5` as a new frontmatter line in `agents/reviewer.md`, same position/style as `agents/planner.md`'s `model: claude-opus-4-6` line; no other content changed. Plan complete — all 3 tasks done. Now that tasks 1-2 wired `--model` through `_load_agent_definition`/`run_subagent`, both the planner and reviewer subagent invocations route to their declared models automatically. No leak into the main checkout (verified `git status` clean on `main`, aside from this expected status.md write).
+
+
+**Run metrics:** 8 driver call(s), $3.8458, session b776ea9b-0246-49e4-bd7e-65bf7b05abcb

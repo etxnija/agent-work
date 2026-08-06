@@ -24,4 +24,4 @@ py-modules = ["cli"]
 where = ["."]
 
 [tool.pytest.ini_options]
-testpaths = ["runner", "bootstrap", "sensors"]
+testpaths = [".", "runner", "bootstrap", "sensors"]

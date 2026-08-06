@@ -34,6 +34,19 @@ def cmd_loop(args) -> int:
     return run_loop(task)
 
 
+def cmd_refactor(args) -> int:
+    from runner.drivers import get_driver
+
+    target = Path(args.path)
+    prompt = f"Review {target} for refactor drift per your instructions."
+    result = get_driver().run_subagent("refactor", prompt, cwd=Path.cwd())
+    if result.exit_code != 0:
+        print(f"[error] {result.text}")
+        return 1
+    print(result.text)
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="agent",
@@ -59,6 +72,12 @@ def main() -> None:
     )
     lp.add_argument("task", nargs="?", help="Task description (prompted if omitted)")
 
+    rp = sub.add_parser(
+        "refactor",
+        help="Flag drift from established codebase patterns",
+    )
+    rp.add_argument("path", help="File or directory to review")
+
     args = parser.parse_args()
 
     match args.command:
@@ -66,6 +85,8 @@ def main() -> None:
             sys.exit(cmd_bootstrap(args))
         case "loop":
             sys.exit(cmd_loop(args))
+        case "refactor":
+            sys.exit(cmd_refactor(args))
 
 
 if __name__ == "__main__":

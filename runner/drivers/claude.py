@@ -29,11 +29,12 @@ def _parse_frontmatter(content: str) -> tuple[dict[str, str], str]:
     return fields, parts[2].strip()
 
 
-def _load_agent_definition(name: str) -> tuple[str | None, list[str]]:
+def _load_agent_definition(name: str) -> tuple[str | None, list[str], str | None]:
     """
-    Load an agent definition. Returns (body, tools_list).
+    Load an agent definition. Returns (body, tools_list, model).
     tools_list comes from the 'tools:' frontmatter field (comma-separated).
-    Returns (None, []) if the agent is not found.
+    model comes from the 'model:' frontmatter field, or None if absent.
+    Returns (None, [], None) if the agent is not found.
     """
     for base in _AGENT_SEARCH_PATHS:
         candidate = base / f"{name}.md"
@@ -41,8 +42,9 @@ def _load_agent_definition(name: str) -> tuple[str | None, list[str]]:
             fields, body = _parse_frontmatter(candidate.read_text())
             tools_raw = fields.get("tools", "")
             tools = [t.strip() for t in tools_raw.split(",") if t.strip()] if tools_raw else []
-            return body, tools
-    return None, []
+            model = fields.get("model") or None
+            return body, tools, model
+    return None, [], None
 
 
 def _parse_result_json(stdout: str) -> tuple[str, float | None, str | None]:
@@ -117,10 +119,12 @@ class ClaudeDriver(AgentDriver):
 
         If the agent declares a 'tools:' list in its frontmatter, --allowedTools is used
         instead of --dangerously-skip-permissions (tighter grant, no permission prompts).
+        If the agent declares a 'model:' field in its frontmatter, --model is appended to
+        route that subagent to a specific model; omitted entirely when absent.
         Inline composition keeps this portable: changing the driver is all that's needed
         to support a different tool.
         """
-        body, tools = _load_agent_definition(agent_name)
+        body, tools, model = _load_agent_definition(agent_name)
         if body is None:
             return AgentResult(
                 text=(
@@ -150,6 +154,9 @@ class ClaudeDriver(AgentDriver):
                 "--output-format", "json",
                 full_prompt,
             ]
+
+        if model:
+            cmd += ["--model", model]
 
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=False)
         text, cost_usd, session_id = _parse_result_json(result.stdout)

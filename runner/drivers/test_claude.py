@@ -58,9 +58,10 @@ class TestLoadAgentDefinition:
         import runner.drivers.claude as mod
         monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
 
-        body, tools = _load_agent_definition("planner")
+        body, tools, model = _load_agent_definition("planner")
         assert body == "You plan."
         assert tools == ["Read", "Glob", "Grep"]
+        assert model is None
 
     def test_no_tools_field_returns_empty_list(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "agents"
@@ -70,17 +71,44 @@ class TestLoadAgentDefinition:
         import runner.drivers.claude as mod
         monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
 
-        body, tools = _load_agent_definition("worker")
+        body, tools, model = _load_agent_definition("worker")
         assert body == "You work."
         assert tools == []
+        assert model is None
+
+    def test_no_model_field_returns_none(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "worker.md").write_text("---\nname: worker\n---\nYou work.")
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        _, _, model = _load_agent_definition("worker")
+        assert model is None
+
+    def test_model_field_returned(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "reviewer.md").write_text(
+            "---\nname: reviewer\nmodel: claude-opus-4-6\n---\nYou review."
+        )
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        body, _, model = _load_agent_definition("reviewer")
+        assert body == "You review."
+        assert model == "claude-opus-4-6"
 
     def test_not_found_returns_none_and_empty(self, tmp_path, monkeypatch):
         import runner.drivers.claude as mod
         monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [tmp_path / "agents"])
 
-        body, tools = _load_agent_definition("missing")
+        body, tools, model = _load_agent_definition("missing")
         assert body is None
         assert tools == []
+        assert model is None
 
 
 # ── _parse_result_json ────────────────────────────────────────────────────────
@@ -283,6 +311,48 @@ class TestClaudeDriverRunSubagent:
         assert result.text == "plan written"
         assert result.cost_usd == 0.03
         assert result.session_id == "sess-planner"
+
+    def test_appends_model_flag_when_model_declared(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "planner.md").write_text(
+            "---\nname: planner\ntools: Read, Glob, Grep, Write\n"
+            "model: claude-opus-4-6\n---\nYou are the planner."
+        )
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        mock_result = MagicMock(
+            stdout=json.dumps({"result": "plan written", "total_cost_usd": 0.03}) + "\n",
+            returncode=0,
+        )
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            ClaudeDriver().run_subagent("planner", "explore")
+
+        cmd = mock_run.call_args[0][0]
+        assert "--allowedTools" in cmd
+        assert "Read,Glob,Grep,Write" in cmd
+        assert "--model" in cmd
+        assert "claude-opus-4-6" in cmd
+
+    def test_no_model_field_omits_model_flag(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "worker.md").write_text("---\nname: worker\n---\nYou work.")
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        mock_result = MagicMock(
+            stdout=json.dumps({"result": "done", "total_cost_usd": 0.005}) + "\n",
+            returncode=0,
+        )
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            ClaudeDriver().run_subagent("worker", "task")
+
+        cmd = mock_run.call_args[0][0]
+        assert "--model" not in cmd
 
     def test_uses_dangerously_skip_when_no_tools_declared(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "agents"

@@ -33,10 +33,25 @@ Ground every claim, doubt, and reconciliation in this context plus the actual co
 ### CLAIM+EXTRACT mode
 
 You're given a target file or module. Examine it in light of the required
-context above. Produce exactly ONE specific, falsifiable architectural claim
-about its coupling, cohesion, or responsibility boundaries, plus the concrete
-evidence from code and docs supporting it. Not a list of options — one claim,
-clearly stated, so it can be doubted.
+context above. Survey it across these dimensions:
+
+- **Cohesion**: does each module/file have one clear reason to change, or does it mix distinct responsibilities that would change for different reasons?
+- **Coupling and dependency direction**: do dependencies point the right way? Any layering violations, or accidental/circular dependencies between modules that shouldn't know about each other?
+- **Abstraction fit** (both directions): is an interface/ABC used where there's no real second implementation and none concretely planned (speculative generality)? Conversely, is the same concern duplicated across multiple call sites where an abstraction is actually missing?
+- **Design-pattern fit**: whether the design pattern chosen is the right one for the problem — a level up from the Refactor agent's job, which only checks whether an already-chosen pattern is applied consistently. Be willing to question the pattern itself, not just its consistency.
+- **Failure-handling design**: is error/failure handling centralized and consistent, or duplicated and ad hoc across call sites?
+- **Testability**: does the current structure make testing straightforward, or does it need excessive mocking/indirection — often a signal of tangled responsibilities?
+- **Domain fit**: does the code's structure and naming actually reflect the problem it's solving, per the required AGENTS.md/roadmap/ADR context already read — not just internal code aesthetics?
+
+Survey the given target broadly across these dimensions first, identify every
+plausible finding, and only then select the single most significant,
+best-evidenced one as the claim. Do not default to whichever file is largest,
+most recently changed, or otherwise most salient — breadth before depth,
+deliberately, especially when the target is a whole directory rather than one
+file. Produce exactly ONE specific, falsifiable architectural claim, plus the
+concrete evidence from code and docs supporting it, arrived at via this
+deliberate survey rather than by anchoring on the first thing encountered.
+Not a list of options — one claim, clearly stated, so it can be doubted.
 
 ### DOUBT mode
 

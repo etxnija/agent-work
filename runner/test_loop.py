@@ -12,6 +12,7 @@ import pytest
 
 from runner.drivers.base import AgentResult
 from runner.loop import (
+    CODE_HEALTH_RETRY_LIMIT,
     PLAN_FILE,
     PLAN_READY_SIGNAL,
     PLANNER_RETRY_LIMIT,
@@ -29,6 +30,7 @@ from runner.loop import (
     _parse_tasks,
     _plan_invalid_reason,
     _review_verdict,
+    _run_code_health_with_retry,
     _run_review_with_retry,
     _run_sensors,
     _run_sensors_with_retry,
@@ -361,6 +363,58 @@ class TestRunSensorsWithRetry:
         assert failures == []
         assert attempt == 2
         assert driver.run.call_count == 2
+
+
+class TestRunCodeHealthWithRetry:
+    def _args(self, tmp_path, driver):
+        return (tmp_path, 1, 1, "plan.md", "AGENTS.md", "memory/status.md", driver)
+
+    @patch("runner.loop.check_code_health")
+    def test_no_findings_returns_empty_and_zero_attempts(self, mock_check, tmp_path):
+        mock_check.return_value = []
+        driver = MagicMock()
+
+        findings, attempt = _run_code_health_with_retry(*self._args(tmp_path, driver))
+
+        assert findings == []
+        assert attempt == 0
+        driver.run.assert_not_called()
+
+    @patch("runner.loop.check_code_health")
+    def test_findings_fixed_after_one_corrective_call(self, mock_check, tmp_path):
+        mock_check.side_effect = [["foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50"], []]
+        driver = MagicMock()
+        driver.run.return_value = _ok()
+
+        findings, attempt = _run_code_health_with_retry(*self._args(tmp_path, driver))
+
+        assert findings == []
+        assert attempt == 1
+        assert driver.run.call_count == 1
+
+    @patch("runner.loop.check_code_health")
+    def test_findings_persist_through_full_budget(self, mock_check, tmp_path):
+        mock_check.return_value = ["foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50"]
+        driver = MagicMock()
+        driver.run.return_value = _ok()
+
+        findings, attempt = _run_code_health_with_retry(*self._args(tmp_path, driver))
+
+        assert findings == ["foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50"]
+        assert attempt == CODE_HEALTH_RETRY_LIMIT
+        assert driver.run.call_count == CODE_HEALTH_RETRY_LIMIT
+
+    @patch("runner.loop.check_code_health")
+    def test_corrective_call_failure_breaks_retry_loop(self, mock_check, tmp_path):
+        mock_check.return_value = ["foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50"]
+        driver = MagicMock()
+        driver.run.return_value = _fail()
+
+        findings, attempt = _run_code_health_with_retry(*self._args(tmp_path, driver))
+
+        assert findings == ["foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50"]
+        assert attempt == 1
+        assert driver.run.call_count == 1
 
 
 class TestRunReviewWithRetry:
@@ -784,6 +838,110 @@ class TestRunLoopSensorRetry:
         printed = [call.args[0] for call in mock_print.call_args_list if call.args]
         assert any(
             "agent/fake-branch" in line and "1 completed task(s)" in line for line in printed
+        )
+
+
+# ── Code-health wiring ────────────────────────────────────────────────────────
+
+class TestRunLoopCodeHealth:
+    def _setup(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(SINGLE_TASK_PLAN)
+
+    def _worker_ok(self, tmp_path):
+        def worker_side_effect(prompt, context_files, cwd=None):
+            status = tmp_path / "memory" / "status.md"
+            status.write_text(status.read_text() + "- done\n")
+            return _ok()
+        return worker_side_effect
+
+    def test_clean_on_first_check_commits_without_finding_message(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = _plan_then_approve
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", return_value=[]), \
+             patch("runner.loop.check_code_health", return_value=[]), \
+             patch("runner.loop._commit_task") as mock_commit, \
+             patch("builtins.print") as mock_print:
+            code = run_loop("task")
+
+        assert code == 0
+        mock_commit.assert_called_once()
+        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
+        assert not any("[code-health]" in line for line in printed)
+
+    def test_findings_fixed_after_one_corrective_call_commits(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = _plan_then_approve
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        findings = ["foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50"]
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", return_value=[]), \
+             patch("runner.loop.check_code_health", side_effect=[findings, []]), \
+             patch("runner.loop._commit_task") as mock_commit, \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert code == 0
+        mock_commit.assert_called_once()
+        # worker call + one code-health corrective call + review approval
+        assert driver.run.call_count == 2
+
+    def test_findings_persist_through_budget_still_commit_and_surface_at_merge(
+        self, tmp_path, monkeypatch
+    ):
+        """Code-health findings that survive every corrective retry do NOT fail
+        closed (unlike sensors) — the commit proceeds and the remaining findings
+        are recorded per-task for the merge-time [code-health] block."""
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = _plan_then_approve
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+        fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
+
+        findings = ["foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50"]
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
+             patch("runner.loop._run_sensors", return_value=[]), \
+             patch("runner.loop.check_code_health", return_value=findings), \
+             patch("runner.loop._commit_task") as mock_commit, \
+             patch("runner.loop._offer_merge", return_value="merged") as mock_offer, \
+             patch("runner.loop._append_narrative_outcome"), \
+             patch("runner.loop._update_coverage_baseline"), \
+             patch("builtins.print") as mock_print:
+            code = run_loop("task")
+
+        assert code == 0
+        mock_commit.assert_called_once()
+        mock_offer.assert_called_once()
+        _, kwargs = mock_offer.call_args
+        assert kwargs["code_health_issues"] == {1: findings}
+        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
+        assert any(
+            "[code-health]" in line and f"attempt {CODE_HEALTH_RETRY_LIMIT}/{CODE_HEALTH_RETRY_LIMIT}" in line
+            for line in printed
         )
 
 
@@ -1506,8 +1664,10 @@ class TestBuildNarrative:
             "summary": "Added the foo helper because bar needed it.",
             "review_approved": True,
             "review_reasoning": "The diff matches the plan.",
+            "code_health_findings": [],
             "sensor_retries": 1,
             "review_retries": 1,
+            "code_health_retries": 0,
         }
         content = _build_narrative("Add feature X", [entry])
         assert content == (
@@ -1516,6 +1676,7 @@ class TestBuildNarrative:
             "## Task 1: Add the foo helper\n"
             "Summary: Added the foo helper because bar needed it.\n"
             "Review: APPROVED — The diff matches the plan.\n"
+            "Code health: clean\n"
             "Retries: 1 sensor retry, 1 review round\n"
         )
 
@@ -1526,8 +1687,10 @@ class TestBuildNarrative:
             "summary": "Did the thing.",
             "review_approved": False,
             "review_reasoning": "Needs more tests.",
+            "code_health_findings": [],
             "sensor_retries": 0,
             "review_retries": 0,
+            "code_health_retries": 0,
         }
         content = _build_narrative("Add feature X", [entry])
         assert content == (
@@ -1536,6 +1699,7 @@ class TestBuildNarrative:
             "## Task 2: Second task\n"
             "Summary: Did the thing.\n"
             "Review: CHANGES REQUESTED (unresolved) — Needs more tests.\n"
+            "Code health: clean\n"
         )
 
     def test_empty_summary_renders_placeholder(self):
@@ -1545,11 +1709,37 @@ class TestBuildNarrative:
             "summary": "",
             "review_approved": True,
             "review_reasoning": "Looks fine.",
+            "code_health_findings": [],
             "sensor_retries": 0,
             "review_retries": 0,
+            "code_health_retries": 0,
         }
         content = _build_narrative("Add feature X", [entry])
         assert "Summary: (worker did not provide a summary)\n" in content
+
+    def test_code_health_findings_listed_and_included_in_retries(self):
+        entry = {
+            "num": 4,
+            "title": "Fourth task",
+            "summary": "Refactored the parser.",
+            "review_approved": True,
+            "review_reasoning": "Looks fine.",
+            "code_health_findings": ["foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50"],
+            "sensor_retries": 0,
+            "review_retries": 0,
+            "code_health_retries": 2,
+        }
+        content = _build_narrative("Add feature X", [entry])
+        assert content == (
+            "# Run narrative: Add feature X\n"
+            "\n"
+            "## Task 4: Fourth task\n"
+            "Summary: Refactored the parser.\n"
+            "Review: APPROVED — Looks fine.\n"
+            "Code health: 1 finding(s) remaining\n"
+            "  - foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50\n"
+            "Retries: 2 code-health retries\n"
+        )
 
 
 class TestWriteNarrative:
@@ -1756,6 +1946,25 @@ class TestOfferMerge:
             ["git", "branch", "-D", "agent/feat"], cwd=tmp_path, capture_output=True, check=False
         )
 
+    def test_code_health_issues_printed_before_prompt(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.delenv("ZELLIJ", raising=False)
+        _init_repo(tmp_path)
+        _make_branch_with_commit(tmp_path, "agent/feat", "add feature")
+
+        code_health_issues = {1: ["foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50"]}
+
+        with patch("builtins.input", return_value="n"):
+            _offer_merge("agent/feat", tmp_path, code_health_issues=code_health_issues)
+
+        out = capsys.readouterr().out
+        assert "[code-health]" in out
+        assert "Task 1:" in out
+        assert "NLOC 60 exceeds threshold 50" in out
+        # cleanup
+        subprocess.run(
+            ["git", "branch", "-D", "agent/feat"], cwd=tmp_path, capture_output=True, check=False
+        )
+
     def test_narrative_path_and_zellij_opens_both_diff_and_narrative_panes(
         self, tmp_path, monkeypatch
     ):
@@ -1931,3 +2140,30 @@ class TestShowDiffInEditor:
         diff_path = Path(mock_edit.call_args[0][0])
         assert diff_path.suffix == ".diff"
         assert "feature.txt" in diff_path.read_text()
+
+    def test_code_health_issues_prepended_to_diff_content(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ZELLIJ", "0")
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        _init_repo(tmp_path)
+        subprocess.run(["git", "checkout", "-b", "agent/feat"],
+                       cwd=tmp_path, check=True, capture_output=True)
+        (tmp_path / "a.txt").write_text("a")
+        subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add a"],
+                       cwd=tmp_path, check=True, capture_output=True, env=env)
+        subprocess.run(["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True)
+
+        code_health_issues = {1: ["foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50"]}
+
+        with patch("runner.loop._zellij_edit") as mock_edit:
+            _show_diff_in_editor(
+                "agent/feat", tmp_path, code_health_issues=code_health_issues
+            )
+
+        mock_edit.assert_called_once()
+        diff_path = Path(mock_edit.call_args[0][0])
+        content = diff_path.read_text()
+        assert "# Outstanding code-health findings" in content
+        assert "## Task 1" in content
+        assert "NLOC 60 exceeds threshold 50" in content

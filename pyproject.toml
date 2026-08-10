@@ -7,7 +7,7 @@ name = "agent-harness"
 version = "0.1.0"
 description = "Personal agent development harness built on Claude Code"
 requires-python = ">=3.12"
-# No third-party dependencies — only stdlib + claude CLI on PATH
+dependencies = ["lizard"]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "diff-cover"]

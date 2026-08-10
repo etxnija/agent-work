@@ -20,6 +20,7 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .code_health import check_code_health
 from .drivers import get_driver
 from .drivers.base import AgentDriver
 from .gates import get_gate
@@ -34,6 +35,7 @@ PLANNER_AGENT = "planner"
 PLAN_READY_SIGNAL = "PLAN READY"
 PLANNER_RETRY_LIMIT = 2
 SENSOR_RETRY_LIMIT = 2
+CODE_HEALTH_RETRY_LIMIT = 2
 
 REVIEWER_AGENT = "reviewer"
 REVIEW_APPROVED_SIGNAL = "REVIEW: APPROVED"
@@ -199,6 +201,59 @@ def _run_sensors_with_retry(
     return failures, attempt
 
 
+def _run_code_health_with_retry(
+    worktree: Path,
+    i: int,
+    total: int,
+    plan_abs: str,
+    agents_abs: str,
+    status_abs: str,
+    driver: AgentDriver,
+) -> tuple[list[str], int]:
+    """
+    Run the lizard-based code-health check, retrying up to
+    CODE_HEALTH_RETRY_LIMIT times with a corrective worker call in between.
+
+    Unlike _run_sensors_with_retry, does not decide fail-closed and does not
+    re-check sensors after each corrective call — code-health corrections are
+    narrower, and the review step that runs immediately after this one already
+    re-checks sensors on its own corrective calls. Returns (findings, attempt) —
+    findings is the (possibly still non-empty) list of remaining findings;
+    attempt is the number of retries used, 0 when clean on the first try.
+    """
+    findings = check_code_health(worktree)
+    attempt = 0
+    while findings and attempt < CODE_HEALTH_RETRY_LIMIT:
+        attempt += 1
+        print(
+            f"[code-health] Task {i}/{total}: {len(findings)} finding(s) "
+            f"(attempt {attempt}/{CODE_HEALTH_RETRY_LIMIT})."
+        )
+        formatted_findings = "\n".join(
+            f"{n}. {finding}" for n, finding in enumerate(findings, start=1)
+        )
+        corrective_prompt = (
+            f"Your last change to this task has these code-health issues:\n\n"
+            f"{formatted_findings}\n\n"
+            f"Fix them and nothing else."
+        )
+        corrective_result = driver.run(
+            corrective_prompt,
+            context_files=[plan_abs, agents_abs, status_abs],
+            cwd=worktree,
+        )
+        if corrective_result.exit_code != 0:
+            print(
+                f"[error] Corrective worker call failed on task {i}/{total}:\n"
+                f"{corrective_result.text}"
+            )
+            break
+
+        findings = check_code_health(worktree)
+
+    return findings, attempt
+
+
 def _run_review_with_retry(
     worktree: Path,
     task_text: str,
@@ -346,13 +401,24 @@ def _build_narrative(task: str, task_narratives: list[dict]) -> str:
             lines.append(
                 f"Review: CHANGES REQUESTED (unresolved) — {entry['review_reasoning']}"
             )
+        code_health_findings = entry["code_health_findings"]
+        if code_health_findings:
+            lines.append(f"Code health: {len(code_health_findings)} finding(s) remaining")
+            for finding in code_health_findings:
+                lines.append(f"  - {finding}")
+        else:
+            lines.append("Code health: clean")
         sensor_retries = entry["sensor_retries"]
         review_retries = entry["review_retries"]
-        if sensor_retries or review_retries:
+        code_health_retries = entry["code_health_retries"]
+        if sensor_retries or review_retries or code_health_retries:
             parts = []
             if sensor_retries:
                 noun = "retry" if sensor_retries == 1 else "retries"
                 parts.append(f"{sensor_retries} sensor {noun}")
+            if code_health_retries:
+                noun = "retry" if code_health_retries == 1 else "retries"
+                parts.append(f"{code_health_retries} code-health {noun}")
             if review_retries:
                 noun = "round" if review_retries == 1 else "rounds"
                 parts.append(f"{review_retries} review {noun}")
@@ -427,7 +493,12 @@ def _zellij_edit(path: str) -> None:
     )
 
 
-def _show_diff_in_editor(branch: str, project_root: Path, critiques: dict[int, str] | None = None) -> None:
+def _show_diff_in_editor(
+    branch: str,
+    project_root: Path,
+    critiques: dict[int, str] | None = None,
+    code_health_issues: dict[int, list[str]] | None = None,
+) -> None:
     """
     Open the branch's full diff against HEAD in a floating editor pane, if
     running inside Zellij. A no-op everywhere else — this is a personal
@@ -447,6 +518,14 @@ def _show_diff_in_editor(branch: str, project_root: Path, critiques: dict[int, s
         return
 
     content = diff.stdout
+    if code_health_issues:
+        lines = ["# Outstanding code-health findings", ""]
+        for task_num, findings in code_health_issues.items():
+            lines.append(f"## Task {task_num}")
+            for finding in findings:
+                lines.append(f"- {finding}")
+            lines.append("")
+        content = "\n".join(lines) + "\n" + content
     if critiques:
         lines = ["# Outstanding review critiques", ""]
         for task_num, critique in critiques.items():
@@ -468,6 +547,7 @@ def _offer_merge(
     task: str = "",
     critiques: dict[int, str] | None = None,
     narrative_path: Path | None = None,
+    code_health_issues: dict[int, list[str]] | None = None,
 ) -> str:
     """
     Show commits on branch and offer a squash-merge into HEAD.
@@ -495,7 +575,14 @@ def _offer_merge(
         for task_num, critique in critiques.items():
             print(f"  Task {task_num}: {critique}")
 
-    _show_diff_in_editor(branch, project_root, critiques)
+    if code_health_issues:
+        print("\n[code-health] Outstanding findings from unresolved code-health checks:")
+        for task_num, findings in code_health_issues.items():
+            print(f"  Task {task_num}:")
+            for finding in findings:
+                print(f"    - {finding}")
+
+    _show_diff_in_editor(branch, project_root, critiques, code_health_issues)
     if narrative_path is not None and "ZELLIJ" in os.environ:
         _zellij_edit(str(narrative_path))
 
@@ -679,6 +766,7 @@ def run_loop(task: str) -> int:
 
     # ── 4. Implement task by task (inside sandbox) ────────────────────────────
     review_critiques: dict[int, str] = {}
+    code_health_issues: dict[int, list[str]] = {}
     task_narratives: list[dict] = []
 
     with sandbox.workspace(project_root) as handle:
@@ -712,6 +800,7 @@ def run_loop(task: str) -> int:
 
             worker_summary = _worker_summary(worker_result.text)
             sensor_retry_count = 0
+            code_health_retry_count = 0
 
             if _file_hash(status_abs) == status_hash_before:
                 print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
@@ -735,6 +824,14 @@ def run_loop(task: str) -> int:
                         f"or merge manually with `git merge --squash {handle.branch} && git commit`."
                     )
                 return 1  # handle.keep() called above → branch preserved for manual recovery
+
+            # ── Code health (lizard: complexity, size, duplication) ──────────
+            findings, ch_retries = _run_code_health_with_retry(
+                handle.path, i, len(tasks), plan_abs, agents_abs, status_abs, driver
+            )
+            code_health_retry_count += ch_retries
+            if findings:
+                code_health_issues[i] = findings
 
             # ── Adversarial review ──────────────────────────────────────────
             approved, critique, review_attempt, review_sensor_retry_count, failures = (
@@ -774,8 +871,10 @@ def run_loop(task: str) -> int:
                     "summary": worker_summary,
                     "review_approved": approved,
                     "review_reasoning": critique,
+                    "code_health_findings": findings,
                     "sensor_retries": sensor_retry_count,
                     "review_retries": review_attempt,
+                    "code_health_retries": code_health_retry_count,
                 }
             )
 
@@ -805,7 +904,12 @@ def run_loop(task: str) -> int:
 
     if handle.branch:  # "" when NoopSandbox is active (tests / no-git projects)
         outcome = _offer_merge(
-            handle.branch, project_root, task, review_critiques, narrative_path=narrative_path
+            handle.branch,
+            project_root,
+            task,
+            review_critiques,
+            narrative_path=narrative_path,
+            code_health_issues=code_health_issues,
         )
         _append_narrative_outcome(narrative_path, outcome)
         if outcome == "merged":

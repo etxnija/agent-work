@@ -31,12 +31,14 @@ def _architecture_verdict(text: str) -> tuple[bool, str]:
     return False, text.strip()
 
 
-def run_architecture_review(target: str, project_root: Path) -> int:
+def run_architecture_review(project_root: Path, hint: str | None = None) -> int:
     """
-    Run the bounded CLAIM->DOUBT->RECONCILE cycle against target, capped at
-    ARCH_MAX_ROUNDS rounds. Writes ARCH_RECOMMENDATION_FILE and pauses on the
-    approval gate as a human checkpoint. Always returns 0 — the gate is a
-    checkpoint, not a pass/fail decision.
+    Run the bounded CLAIM->DOUBT->RECONCILE cycle against the whole project,
+    capped at ARCH_MAX_ROUNDS rounds. An optional hint points the initial
+    claim at a possible lead without limiting the review's scope to it.
+    Writes ARCH_RECOMMENDATION_FILE and pauses on the approval gate as a
+    human checkpoint. Always returns 0 — the gate is a checkpoint, not a
+    pass/fail decision.
     """
     metrics = Metrics()
     driver = _MeteredDriver(get_driver(), metrics)
@@ -50,18 +52,26 @@ def run_architecture_review(target: str, project_root: Path) -> int:
         if round_num == 1:
             claim_prompt = (
                 "Mode: CLAIM+EXTRACT\n\n"
-                f"Target: {target}\n\n"
-                "Examine this file or module and produce exactly one specific, "
+                "Examine this project and produce exactly one specific, "
                 "falsifiable architectural claim about its coupling, cohesion, or "
                 "responsibility boundaries, plus the concrete evidence from code "
                 "and docs supporting it."
             )
+            if hint is not None:
+                claim_prompt += (
+                    "\n\nThe user has flagged a possible architectural smell as a "
+                    f"starting point: {hint}. Treat this as one lead among the "
+                    "review dimensions in your instructions, not as an assumed "
+                    "conclusion — investigate it for real evidence before deciding "
+                    "whether it's the strongest finding. If your survey turns up "
+                    "something more significant elsewhere, follow the evidence "
+                    "instead, and say so."
+                )
             claim_result = driver.run_subagent(ARCHITECT_AGENT, claim_prompt, cwd=project_root)
             claim_text = claim_result.text
 
         doubt_prompt = (
             "Mode: DOUBT\n\n"
-            f"Target: {target}\n\n"
             f"Prior claim and evidence:\n{claim_text}\n\n"
             "Actively try to falsify this claim: look for counter-evidence, cases "
             "it ignored, documented constraints or decisions (ADRs, roadmap) "
@@ -73,7 +83,6 @@ def run_architecture_review(target: str, project_root: Path) -> int:
 
         reconcile_prompt = (
             "Mode: RECONCILE\n\n"
-            f"Target: {target}\n\n"
             f"Claim and evidence:\n{claim_text}\n\n"
             f"Doubt raised:\n{doubt_text}\n\n"
             "Decide whether the claim survives, and end with exactly one marker line."
@@ -95,7 +104,10 @@ def run_architecture_review(target: str, project_root: Path) -> int:
             break
         claim_text = recommendation
 
-    lines = [f"# Architecture Review: {target}", ""]
+    header = "# Architecture Review"
+    if hint is not None:
+        header += f" (hint: {hint})"
+    lines = [header, ""]
     for idx, entry in enumerate(rounds, 1):
         outcome = "CONVERGED" if entry["converged"] else "REVISED"
         lines.append(f"## Round {idx}")

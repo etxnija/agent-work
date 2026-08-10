@@ -49,7 +49,7 @@ def cmd_refactor(args) -> int:
 
 def cmd_architect(args) -> int:
     from runner.architecture import run_architecture_review
-    return run_architecture_review(args.hint, Path.cwd())
+    return run_architecture_review(Path.cwd(), args.hint)
 
 
 def main() -> None:

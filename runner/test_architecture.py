@@ -55,7 +55,7 @@ class TestRunArchitectureReview:
         with patch("runner.architecture.get_driver", return_value=driver), \
              patch("runner.architecture.get_gate", return_value=gate), \
              patch("builtins.print"):
-            code = run_architecture_review("some/target.py", tmp_path)
+            code = run_architecture_review(tmp_path)
 
         assert driver.run_subagent.call_count == 3
         recommendation_file = tmp_path / "architecture-recommendation.md"
@@ -80,7 +80,7 @@ class TestRunArchitectureReview:
         with patch("runner.architecture.get_driver", return_value=driver), \
              patch("runner.architecture.get_gate", return_value=gate), \
              patch("builtins.print"):
-            code = run_architecture_review("some/target.py", tmp_path)
+            code = run_architecture_review(tmp_path)
 
         assert driver.run_subagent.call_count == 5
         assert (tmp_path / "architecture-recommendation.md").exists()
@@ -105,7 +105,7 @@ class TestRunArchitectureReview:
         with patch("runner.architecture.get_driver", return_value=driver), \
              patch("runner.architecture.get_gate", return_value=gate), \
              patch("builtins.print"):
-            code = run_architecture_review("some/target.py", tmp_path)
+            code = run_architecture_review(tmp_path)
 
         assert driver.run_subagent.call_count == 7
         recommendation_file = tmp_path / "architecture-recommendation.md"
@@ -128,7 +128,54 @@ class TestRunArchitectureReview:
         with patch("runner.architecture.get_driver", return_value=driver), \
              patch("runner.architecture.get_gate", return_value=gate), \
              patch("builtins.print"):
-            code = run_architecture_review("some/target.py", tmp_path)
+            code = run_architecture_review(tmp_path)
 
         gate.request.assert_called_once_with("architecture-recommendation.md")
         assert code == 0
+
+    def test_no_hint_claim_prompt_has_no_hint_text_and_header_is_plain(self, tmp_path):
+        _make_project(tmp_path)
+        driver = MagicMock()
+        driver.run_subagent.side_effect = [
+            _res("claim text"),
+            _res("doubt text"),
+            _res(f"{ARCH_CONVERGED_SIGNAL}\nfinal recommendation"),
+        ]
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.architecture.get_driver", return_value=driver), \
+             patch("runner.architecture.get_gate", return_value=gate), \
+             patch("builtins.print"):
+            run_architecture_review(tmp_path)
+
+        claim_prompt = driver.run_subagent.call_args_list[0].args[1]
+        assert "starting point" not in claim_prompt
+        assert "flagged" not in claim_prompt
+        recommendation_file = tmp_path / "architecture-recommendation.md"
+        assert recommendation_file.read_text().splitlines()[0] == "# Architecture Review"
+
+    def test_hint_appears_in_claim_only_and_header_includes_hint(self, tmp_path):
+        _make_project(tmp_path)
+        driver = MagicMock()
+        driver.run_subagent.side_effect = [
+            _res("claim text"),
+            _res("doubt text"),
+            _res(f"{ARCH_CONVERGED_SIGNAL}\nfinal recommendation"),
+        ]
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.architecture.get_driver", return_value=driver), \
+             patch("runner.architecture.get_gate", return_value=gate), \
+             patch("builtins.print"):
+            run_architecture_review(tmp_path, hint="loop.py is too big")
+
+        claim_prompt = driver.run_subagent.call_args_list[0].args[1]
+        doubt_prompt = driver.run_subagent.call_args_list[1].args[1]
+        reconcile_prompt = driver.run_subagent.call_args_list[2].args[1]
+        assert "loop.py is too big" in claim_prompt
+        assert "loop.py is too big" not in doubt_prompt
+        assert "loop.py is too big" not in reconcile_prompt
+        recommendation_file = tmp_path / "architecture-recommendation.md"
+        assert "(hint: loop.py is too big)" in recommendation_file.read_text().splitlines()[0]

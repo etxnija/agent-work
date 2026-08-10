@@ -71,15 +71,15 @@ class TestMainRefactorWiring:
 
 
 class TestCmdArchitect:
-    def test_calls_run_architecture_review_with_path_and_cwd(self):
+    def test_calls_run_architecture_review_with_cwd_and_no_hint(self):
         with patch("runner.architecture.run_architecture_review", return_value=0) as mock_run:
-            cmd_architect(argparse.Namespace(hint="some/file.py"))
+            cmd_architect(argparse.Namespace(hint=None))
 
-        mock_run.assert_called_once_with("some/file.py", Path.cwd())
+        mock_run.assert_called_once_with(Path.cwd(), None)
 
     def test_returns_result_of_run_architecture_review(self):
         with patch("runner.architecture.run_architecture_review", return_value=0) as mock_run:
-            result = cmd_architect(argparse.Namespace(hint="some/file.py"))
+            result = cmd_architect(argparse.Namespace(hint=None))
 
         assert result == 0
         mock_run.assert_called_once()
@@ -87,14 +87,20 @@ class TestCmdArchitect:
     def test_resolves_path_relative_to_cwd(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         with patch("runner.architecture.run_architecture_review", return_value=0) as mock_run:
-            cmd_architect(argparse.Namespace(hint="relative/target.py"))
+            cmd_architect(argparse.Namespace(hint=None))
 
-        mock_run.assert_called_once_with("relative/target.py", tmp_path)
+        mock_run.assert_called_once_with(tmp_path, None)
+
+    def test_hint_passed_through(self):
+        with patch("runner.architecture.run_architecture_review", return_value=0) as mock_run:
+            cmd_architect(argparse.Namespace(hint="some hint text"))
+
+        mock_run.assert_called_once_with(Path.cwd(), "some hint text")
 
 
 class TestMainArchitectWiring:
-    def test_architect_subcommand_dispatches_to_cmd_architect(self, monkeypatch):
-        monkeypatch.setattr("sys.argv", ["agent", "architect", "some/file.py"])
+    def test_architect_subcommand_with_no_hint_dispatches_with_hint_none(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["agent", "architect"])
         mock_cmd_architect = MagicMock(return_value=0)
         monkeypatch.setattr(cli, "cmd_architect", mock_cmd_architect)
 
@@ -103,4 +109,16 @@ class TestMainArchitectWiring:
 
         assert exc_info.value.code == 0
         mock_cmd_architect.assert_called_once()
-        assert mock_cmd_architect.call_args.args[0].hint == "some/file.py"
+        assert mock_cmd_architect.call_args.args[0].hint is None
+
+    def test_architect_subcommand_with_hint_dispatches_with_hint_text(self, monkeypatch):
+        monkeypatch.setattr("sys.argv", ["agent", "architect", "loop.py is too big"])
+        mock_cmd_architect = MagicMock(return_value=0)
+        monkeypatch.setattr(cli, "cmd_architect", mock_cmd_architect)
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+        assert exc_info.value.code == 0
+        mock_cmd_architect.assert_called_once()
+        assert mock_cmd_architect.call_args.args[0].hint == "loop.py is too big"

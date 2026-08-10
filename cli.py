@@ -49,7 +49,7 @@ def cmd_refactor(args) -> int:
 
 def cmd_architect(args) -> int:
     from runner.architecture import run_architecture_review
-    return run_architecture_review(args.path, Path.cwd())
+    return run_architecture_review(args.hint, Path.cwd())
 
 
 def main() -> None:
@@ -85,9 +85,14 @@ def main() -> None:
 
     ap = sub.add_parser(
         "architect",
-        help="Review a file or module's architectural shape",
+        help="Review the project's architectural shape",
     )
-    ap.add_argument("path", help="File or module to review")
+    ap.add_argument(
+        "hint",
+        nargs="?",
+        default=None,
+        help="Optional pointer to what looks off, to help focus the review — reviews the whole project either way.",
+    )
 
     args = parser.parse_args()
 

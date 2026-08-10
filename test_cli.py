@@ -73,13 +73,13 @@ class TestMainRefactorWiring:
 class TestCmdArchitect:
     def test_calls_run_architecture_review_with_path_and_cwd(self):
         with patch("runner.architecture.run_architecture_review", return_value=0) as mock_run:
-            cmd_architect(argparse.Namespace(path="some/file.py"))
+            cmd_architect(argparse.Namespace(hint="some/file.py"))
 
         mock_run.assert_called_once_with("some/file.py", Path.cwd())
 
     def test_returns_result_of_run_architecture_review(self):
         with patch("runner.architecture.run_architecture_review", return_value=0) as mock_run:
-            result = cmd_architect(argparse.Namespace(path="some/file.py"))
+            result = cmd_architect(argparse.Namespace(hint="some/file.py"))
 
         assert result == 0
         mock_run.assert_called_once()
@@ -87,7 +87,7 @@ class TestCmdArchitect:
     def test_resolves_path_relative_to_cwd(self, monkeypatch, tmp_path):
         monkeypatch.chdir(tmp_path)
         with patch("runner.architecture.run_architecture_review", return_value=0) as mock_run:
-            cmd_architect(argparse.Namespace(path="relative/target.py"))
+            cmd_architect(argparse.Namespace(hint="relative/target.py"))
 
         mock_run.assert_called_once_with("relative/target.py", tmp_path)
 
@@ -103,4 +103,4 @@ class TestMainArchitectWiring:
 
         assert exc_info.value.code == 0
         mock_cmd_architect.assert_called_once()
-        assert mock_cmd_architect.call_args.args[0].path == "some/file.py"
+        assert mock_cmd_architect.call_args.args[0].hint == "some/file.py"

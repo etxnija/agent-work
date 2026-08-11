@@ -674,3 +674,26 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 
 **Run metrics:** 21 driver call(s), $16.2344, session ffd6850a-bf23-488c-b7d9-a0a0db9070fc
+
+## 2026-08-11 — Exclude-test-files plan task 1: filter `test_*.py` in `_changed_files()`
+
+### Done
+- Added a second filter condition to `_changed_files()` (`runner/code_health.py`) excluding entries where `Path(f).name` starts with `test_` and ends with `.py`, so test files are excluded from both the metric and duplicate lizard passes at the single choke point both consume; `ruff check`/`pyright` clean, existing `runner/test_code_health.py` (6 tests) still passing.
+
+## 2026-08-11 — Exclude-test-files plan task 2: regression test for the `test_*.py` exclusion
+
+### Done
+- Added `test_test_file_with_violations_produces_no_findings` to `TestCheckCodeHealth` (`runner/test_code_health.py`): a `test_something.py` with two identical-shaped large functions (`alpha`/`beta`, reusing `test_nloc_violation_is_flagged`'s size), committed on a feature branch, asserting `check_code_health(tmp_path) == []`; independently confirmed via a throwaway `/tmp` repo that the identical content under a non-`test_*.py` name (`real_module.py`) does produce both NLOC and duplicate findings, so the new test genuinely exercises task 1's filter rather than passing vacuously. 209 tests passing (up from 208), `ruff check .` and `pyright` both clean; no leak into the main checkout (verified `git status` clean on `main`, aside from this expected status.md write and pre-existing unrelated untracked `architecture-recommendation.md`/`debug_code_health.py`).
+
+## 2026-08-11 — Exclude-test-files plan task 3: regression test confirming the filter is name-based
+
+### Done
+- Added `test_non_test_file_with_same_content_is_flagged` to `TestCheckCodeHealth` (`runner/test_code_health.py`): same violation-triggering content as task 2's `test_something.py` (two identical-shaped large functions), but committed as `real_module.py` (not matching `test_*.py`) on a feature branch, asserting `check_code_health(tmp_path) != []` — confirms the filter added in task 1 excludes by filename, not by content. 209 tests passing, `ruff check .` and `pyright` both clean; no leak into the main checkout (verified `git status` clean on `main`, aside from this expected status.md write and pre-existing unrelated untracked `architecture-recommendation.md`/`debug_code_health.py`).
+
+## 2026-08-11 — Exclude-test-files plan task 4: mixed-changeset regression test
+
+### Done
+- Added `test_mixed_changeset_only_non_test_file_is_flagged` to `TestCheckCodeHealth` (`runner/test_code_health.py`): commits both `test_foo.py` and `production.py` (same violation-triggering content as tasks 2-3) together on one feature branch, asserting `check_code_health(tmp_path)` findings all reference `production.py` and none reference `test_foo.py`. Plan complete — all 4 tasks done. 211 tests passing (up from 209), `ruff check .` and `pyright` both clean; no leak into the main checkout (verified `git status` clean on `main`, aside from this expected status.md write and the pre-existing unrelated untracked `architecture-recommendation.md`/`debug_code_health.py`).
+
+
+**Run metrics:** 10 driver call(s), $4.4224, session 8c91f321-178f-4fe1-be51-86922eaaef27

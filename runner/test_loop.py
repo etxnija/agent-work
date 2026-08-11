@@ -84,7 +84,7 @@ def _fail(text="error", session_id=None) -> AgentResult:
     return AgentResult(text=text, exit_code=1, session_id=session_id)
 
 
-def _plan_then_approve(agent_name, prompt, cwd=None) -> AgentResult:
+def _plan_then_approve(agent_name, prompt, context_files=None, cwd=None) -> AgentResult:
     """run_subagent side_effect: PLAN READY for the planner, approved for the reviewer."""
     if agent_name == REVIEWER_AGENT:
         return _ok(REVIEW_APPROVED_SIGNAL)
@@ -1061,7 +1061,7 @@ class TestRunLoopReviewRetry:
 
         review_calls = 0
 
-        def run_subagent_side_effect(agent_name, prompt, cwd=None):
+        def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
             nonlocal review_calls
             if agent_name == REVIEWER_AGENT:
                 review_calls += 1
@@ -1098,7 +1098,7 @@ class TestRunLoopReviewRetry:
     ):
         self._setup(tmp_path, monkeypatch)
 
-        def run_subagent_side_effect(agent_name, prompt, cwd=None):
+        def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
             if agent_name == REVIEWER_AGENT:
                 return _ok(f"{REVIEW_CHANGES_SIGNAL}\nStill not right.")
             return _ok(PLAN_READY_SIGNAL)
@@ -1134,7 +1134,7 @@ class TestRunLoopReviewRetry:
     ):
         self._setup(tmp_path, monkeypatch)
 
-        def run_subagent_side_effect(agent_name, prompt, cwd=None):
+        def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
             if agent_name == REVIEWER_AGENT:
                 return _ok(f"{REVIEW_CHANGES_SIGNAL}\nFix the thing.")
             return _ok(PLAN_READY_SIGNAL)
@@ -1186,7 +1186,7 @@ class TestRunLoopReviewRetry:
 
         review_calls = 0
 
-        def run_subagent_side_effect(agent_name, prompt, cwd=None):
+        def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
             nonlocal review_calls
             if agent_name == REVIEWER_AGENT:
                 review_calls += 1
@@ -1246,7 +1246,7 @@ class TestRunLoopNarrative:
             status.write_text(status.read_text() + "- done\n")
             return _ok("Did the work.\nSUMMARY: Added the config file because tests needed it.")
 
-        def run_subagent_side_effect(agent_name, prompt, cwd=None):
+        def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
             if agent_name == REVIEWER_AGENT:
                 return _ok(f"{REVIEW_APPROVED_SIGNAL}\nConfig matches the plan.")
             return _ok(PLAN_READY_SIGNAL)
@@ -1315,7 +1315,7 @@ class TestRunLoopMetricsSummary:
             status.write_text(status.read_text() + "- done\n")
             return _ok()
 
-        def run_subagent_side_effect(agent_name, prompt, cwd=None):
+        def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
             if agent_name == REVIEWER_AGENT:
                 return _ok(REVIEW_APPROVED_SIGNAL, session_id="sess-review")
             return _ok(PLAN_READY_SIGNAL)
@@ -1474,7 +1474,7 @@ class TestRunLoopPlannerRetry:
 
         planner_calls = {"n": 0}
 
-        def side_effect(agent_name, prompt, cwd=None):
+        def side_effect(agent_name, prompt, *args, **kwargs):
             if agent_name == REVIEWER_AGENT:
                 return _ok(REVIEW_APPROVED_SIGNAL)
             planner_calls["n"] += 1
@@ -1549,7 +1549,7 @@ class TestRunLoopPlannerRetry:
 
         calls = {"n": 0}
 
-        def side_effect(agent_name, prompt, cwd=None):
+        def side_effect(agent_name, prompt, *args, **kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
                 return _ok("no signal here")
@@ -1677,6 +1677,19 @@ class TestTaskDiff:
         diff = _task_diff(tmp_path)
         assert "new.txt" in diff
         assert "+hello" in diff
+
+    def test_diff_truncated_when_exceeding_max_lines(self, tmp_path, monkeypatch):
+        self._init_repo(tmp_path)
+        long_content = "\n".join(f"line {i}" for i in range(600)) + "\n"
+        (tmp_path / "large.txt").write_text(long_content)
+
+        import runner.loop as mod
+        monkeypatch.setattr(mod, "MAX_DIFF_LINES", 10)
+
+        diff = _task_diff(tmp_path)
+        assert "large.txt" in diff
+        assert "diff truncated:" in diff
+        assert "additional lines omitted" in diff
 
     def test_no_changes_returns_empty_diff(self, tmp_path):
         self._init_repo(tmp_path)

@@ -724,3 +724,12 @@ worktree-isolation root cause is also still open if it's worth another look.
 - Restructured `worker_prompt`, `review_prompt`, and all corrective retry prompts so that static instruction prefixes appear first, followed by dynamic task/diff data at the end.
 - Combined with `AGENTS.md` being position-first in `context_files`, this maximizes Anthropic prompt caching hits (yielding up to 90% prefill token savings across sequential task calls and retries). All 217 tests passing.
 
+## 2026-08-11 — Reviewer Sub-Agent Token Optimization
+
+### Done
+- Pre-injected `AGENTS.md` into `AgentDriver.run_subagent()` context via `context_files` parameter in `runner/drivers/base.py`, `runner/drivers/claude.py`, and `runner/metrics.py`, eliminating the forced `Read("AGENTS.md")` tool turn in `_run_single_review()`.
+- Refined `agents/reviewer.md` instructions: clarified that mechanical checks (tests, syntax, types, lint) are pre-verified by computational sensors, instructing the reviewer to form its adversarial verdict directly from the diff and `AGENTS.md` without making exploratory tool calls unless inspecting surrounding caller sites is genuinely required.
+- Added `MAX_DIFF_LINES = 500` truncation in `_task_diff()` in `runner/loop.py` to prevent giant diffs from flooding the review prompt context.
+- Added unit tests in `runner/drivers/test_claude.py` and `runner/test_loop.py`. All 219 pytest cases passing cleanly.
+
+

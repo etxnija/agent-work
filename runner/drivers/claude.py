@@ -111,6 +111,7 @@ class ClaudeDriver(AgentDriver):
         self,
         agent_name: str,
         prompt: str,
+        context_files: list[str] | None = None,
         cwd: Path | None = None,
     ) -> AgentResult:
         """
@@ -134,7 +135,8 @@ class ClaudeDriver(AgentDriver):
                 exit_code=1,
             )
 
-        full_prompt = f"{body}\n\n---\n\n{prompt}"
+        context_files = context_files or []
+        full_prompt = _inject_context(f"{body}\n\n---\n\n{prompt}", context_files)
 
         if tools:
             # --allowedTools restricts which tools are available (security boundary).

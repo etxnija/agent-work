@@ -398,6 +398,25 @@ class TestClaudeDriverRunSubagent:
         assert result.text == "plan written"
         assert result.session_id == "sess-compose"
 
+    def test_run_subagent_injects_context_files(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "reviewer.md").write_text("---\nname: reviewer\n---\nYou review.")
+        ctx = tmp_path / "AGENTS.md"
+        ctx.write_text("rules and conventions")
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        mock_result = MagicMock(stdout=json.dumps({"result": "REVIEW: APPROVED"}) + "\n", returncode=0)
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            ClaudeDriver().run_subagent("reviewer", "review task", context_files=[str(ctx)])
+
+        called_prompt = mock_run.call_args[0][0][-1]
+        assert "rules and conventions" in called_prompt
+        assert "You review." in called_prompt
+        assert "review task" in called_prompt
+
     def test_returns_error_when_agent_not_found(self, tmp_path, monkeypatch):
         import runner.drivers.claude as mod
         monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [tmp_path / "agents"])

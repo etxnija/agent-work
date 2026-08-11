@@ -39,7 +39,15 @@ class _MeteredDriver(AgentDriver):
         self._metrics.record(result)
         return result
 
-    def run_subagent(self, agent_name: str, prompt: str, cwd: Path | None = None) -> AgentResult:
-        result = self._inner.run_subagent(agent_name, prompt, cwd=cwd)
+    def run_subagent(
+        self,
+        agent_name: str,
+        prompt: str,
+        context_files: list[str] | None = None,
+        cwd: Path | None = None,
+    ) -> AgentResult:
+        result = self._inner.run_subagent(
+            agent_name, prompt, context_files=context_files, cwd=cwd
+        )
         self._metrics.record(result)
         return result

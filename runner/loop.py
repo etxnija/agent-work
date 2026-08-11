@@ -340,6 +340,40 @@ def _run_code_health_with_retry(
     return findings, attempt
 
 
+def _run_single_review(
+    driver: AgentDriver,
+    worktree: Path,
+    task_text: str,
+    context_files: list[str] | None = None,
+) -> tuple[bool, str]:
+    """Run one reviewer sub-agent pass over the task's current diff."""
+    diff = _task_diff(worktree)
+    review_prompt = (
+        f"{REVIEWER_STATIC_INSTRUCTIONS}\n\n"
+        f"Task:\n{task_text}\n\n"
+        f"Diff:\n```diff\n{diff}\n```"
+    )
+    review_result = driver.run_subagent(
+        REVIEWER_AGENT, review_prompt, context_files=context_files, cwd=worktree
+    )
+    return _review_verdict(review_result.text)
+
+
+def _apply_review_corrective(
+    driver: AgentDriver, critique: str, ctx: list[str], worktree: Path, i: int, total: int
+) -> bool:
+    """Run a corrective worker call for a review critique. Returns True on success."""
+    corrective_prompt = f"{REVIEW_CORRECTIVE_INSTRUCTIONS}\n\n{critique}"
+    corrective_result = driver.run(corrective_prompt, context_files=ctx, cwd=worktree)
+    if corrective_result.exit_code != 0:
+        print(
+            f"[error] Corrective worker call failed on task {i}/{total}:\n"
+            f"{corrective_result.text}"
+        )
+        return False
+    return True
+
+
 def _run_review_with_retry(
     worktree: Path,
     task_text: str,
@@ -368,14 +402,7 @@ def _run_review_with_retry(
     sensor_retry_count = 0
     ctx = context_files if context_files is not None else [agents_abs]
     while True:
-        diff = _task_diff(worktree)
-        review_prompt = (
-            f"{REVIEWER_STATIC_INSTRUCTIONS}\n\n"
-            f"Task:\n{task_text}\n\n"
-            f"Diff:\n```diff\n{diff}\n```"
-        )
-        review_result = driver.run_subagent(REVIEWER_AGENT, review_prompt, cwd=worktree)
-        approved, critique = _review_verdict(review_result.text)
+        approved, critique = _run_single_review(driver, worktree, task_text, context_files=ctx)
 
         if approved:
             review_critiques.pop(i, None)
@@ -395,20 +422,7 @@ def _run_review_with_retry(
             f"[review] Task {i}/{total}: changes requested "
             f"(attempt {review_attempt}/{REVIEW_RETRY_LIMIT})."
         )
-        corrective_prompt = (
-            f"{REVIEW_CORRECTIVE_INSTRUCTIONS}\n\n"
-            f"{critique}"
-        )
-        corrective_result = driver.run(
-            corrective_prompt,
-            context_files=ctx,
-            cwd=worktree,
-        )
-        if corrective_result.exit_code != 0:
-            print(
-                f"[error] Corrective worker call failed on task {i}/{total}:\n"
-                f"{corrective_result.text}"
-            )
+        if not _apply_review_corrective(driver, critique, ctx, worktree, i, total):
             review_critiques[i] = critique
             return approved, critique, review_attempt, sensor_retry_count, []
 
@@ -424,6 +438,9 @@ def _run_review_with_retry(
             return approved, critique, review_attempt, sensor_retry_count, failures
 
 
+MAX_DIFF_LINES = 500
+
+
 def _task_diff(worktree: Path) -> str:
     """
     Capture the worktree's current uncommitted changes as a diff string.
@@ -432,13 +449,23 @@ def _task_diff(worktree: Path) -> str:
     own git add -A right before committing) so new/modified/deleted files
     all show up, since sub-agents like the reviewer have no Bash and can't
     run git diff themselves.
+
+    Caps raw output at MAX_DIFF_LINES lines to avoid flooding prompt context.
     """
     subprocess.run(["git", "add", "-A"], cwd=worktree, capture_output=True, check=False)
     result = subprocess.run(
         ["git", "diff", "--cached", "HEAD"],
         cwd=worktree, capture_output=True, text=True, check=False,
     )
-    return result.stdout
+    diff = result.stdout
+    lines = diff.splitlines()
+    if len(lines) > MAX_DIFF_LINES:
+        truncated_count = len(lines) - MAX_DIFF_LINES
+        diff = (
+            "\n".join(lines[:MAX_DIFF_LINES])
+            + f"\n\n... [diff truncated: {truncated_count} additional lines omitted]"
+        )
+    return diff
 
 
 def _review_verdict(text: str) -> tuple[bool, str]:
@@ -627,6 +654,44 @@ def _show_diff_in_editor(
     _zellij_edit(path)
 
 
+def _perform_squash_merge(branch: str, project_root: Path, task: str, commits: list[str]) -> str:
+    """Squash branch's commits into one commit on the current branch, deleting branch on success."""
+    squash = subprocess.run(
+        ["git", "merge", "--squash", branch],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if squash.returncode != 0:
+        print(f"[merge] Squash failed: {squash.stderr.strip()}")
+        print(f"[merge] Branch '{branch}' preserved.")
+        return "squash failed"
+
+    # Build a single commit message: task as subject, per-task commits as body.
+    subject = task.strip() or branch
+    body = "\n".join(f"- {c}" for c in commits)
+    commit_msg = f"{subject}\n\n{body}"
+
+    commit = subprocess.run(
+        ["git", "commit", "-m", commit_msg],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if commit.returncode == 0:
+        subprocess.run(
+            ["git", "branch", "-D", branch], cwd=project_root, capture_output=True, check=False
+        )
+        print(f"[merge] Done. Squashed into one commit; branch '{branch}' deleted.")
+        return "merged"
+
+    print(f"[merge] Commit failed: {commit.stderr.strip()}")
+    print(f"[merge] Branch '{branch}' preserved.")
+    return "commit failed"
+
+
 def _offer_merge(
     branch: str,
     project_root: Path,
@@ -678,40 +743,7 @@ def _offer_merge(
         print(f"  git merge --squash {branch} && git commit && git branch -D {branch}")
         return "declined"
 
-    squash = subprocess.run(
-        ["git", "merge", "--squash", branch],
-        cwd=project_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if squash.returncode != 0:
-        print(f"[merge] Squash failed: {squash.stderr.strip()}")
-        print(f"[merge] Branch '{branch}' preserved.")
-        return "squash failed"
-
-    # Build a single commit message: task as subject, per-task commits as body.
-    subject = task.strip() or branch
-    body = "\n".join(f"- {c}" for c in commits)
-    commit_msg = f"{subject}\n\n{body}"
-
-    commit = subprocess.run(
-        ["git", "commit", "-m", commit_msg],
-        cwd=project_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if commit.returncode == 0:
-        subprocess.run(
-            ["git", "branch", "-D", branch], cwd=project_root, capture_output=True, check=False
-        )
-        print(f"[merge] Done. Squashed into one commit; branch '{branch}' deleted.")
-        return "merged"
-
-    print(f"[merge] Commit failed: {commit.stderr.strip()}")
-    print(f"[merge] Branch '{branch}' preserved.")
-    return "commit failed"
+    return _perform_squash_merge(branch, project_root, task, commits)
 
 
 def _update_coverage_baseline(project_root: Path) -> None:
@@ -758,27 +790,27 @@ def _update_coverage_baseline(project_root: Path) -> None:
     )
 
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
+# ── run_loop helpers ─────────────────────────────────────────────────────────
 
-def run_loop(task: str) -> int:
+def _check_plan_result(plan_result, plan_path: Path) -> int | None:
+    """Return an exit code if the planner subprocess itself failed, else None."""
+    if plan_result.exit_code != 0:
+        print(f"[error] Planner exited with code {plan_result.exit_code}:\n{plan_result.text}")
+        return 1
+    if not plan_path.exists():
+        print(f"[error] Planner did not write {PLAN_FILE}.\nPlanner output:\n{plan_result.text}")
+        return 1
+    return None
+
+
+def _generate_plan(driver: AgentDriver, task: str) -> int:
     """
-    Execute one plan → approve → implement cycle, implementing one task at a time.
-    Returns exit code (0 = success, 1 = error, 2 = rejected by human).
+    Run the planner, with corrective retries, until plan.md is valid.
+
+    Writes plan.md as a side effect (via the planner sub-agent). Returns 0 on
+    success, 1 on error (planner crash, missing plan.md, or a plan still
+    invalid after PLANNER_RETRY_LIMIT retries).
     """
-    driver = get_driver()
-    run_metrics = Metrics()
-    driver = _MeteredDriver(driver, run_metrics)
-    gate = get_gate()
-    sandbox = get_sandbox()
-
-    project_root = Path.cwd().resolve()
-    plan_abs = str(project_root / PLAN_FILE)
-    agents_abs = str(project_root / AGENTS_MD)
-    status_abs = str(project_root / STATUS_MD)
-    run_timestamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
-
-    # ── 1. Plan ──────────────────────────────────────────────────────────────
-    # Planner runs in the project root (read-only; no sandbox needed).
     print(f"\n[planner] Task: {task!r}")
     print("[planner] Exploring codebase…")
 
@@ -786,15 +818,11 @@ def run_loop(task: str) -> int:
         PLANNER_AGENT,
         f"Task: {task}\n\nExplore the codebase and write a plan to plan.md following your instructions.",
     )
-
-    if plan_result.exit_code != 0:
-        print(f"[error] Planner exited with code {plan_result.exit_code}:\n{plan_result.text}")
-        return 1
-
     plan_path = Path(PLAN_FILE)
-    if not plan_path.exists():
-        print(f"[error] Planner did not write {PLAN_FILE}.\nPlanner output:\n{plan_result.text}")
-        return 1
+
+    exit_code = _check_plan_result(plan_result, plan_path)
+    if exit_code is not None:
+        return exit_code
 
     attempt = 0
     invalid_reason = _plan_invalid_reason(plan_result.text, PLAN_FILE)
@@ -811,13 +839,9 @@ def run_loop(task: str) -> int:
         )
         plan_result = driver.run_subagent(PLANNER_AGENT, corrective_prompt)
 
-        if plan_result.exit_code != 0:
-            print(f"[error] Planner exited with code {plan_result.exit_code}:\n{plan_result.text}")
-            return 1
-
-        if not plan_path.exists():
-            print(f"[error] Planner did not write {PLAN_FILE}.\nPlanner output:\n{plan_result.text}")
-            return 1
+        exit_code = _check_plan_result(plan_result, plan_path)
+        if exit_code is not None:
+            return exit_code
 
         invalid_reason = _plan_invalid_reason(plan_result.text, PLAN_FILE)
 
@@ -828,162 +852,188 @@ def run_loop(task: str) -> int:
         )
         return 1
 
-    # ── 2. Approval gate ─────────────────────────────────────────────────────
-    approved = gate.request(PLAN_FILE)
-    if not approved:
-        print("[loop] Plan rejected — exiting without changes.")
-        _append_status(
-            f"\n## {datetime.now(tz=UTC).date().isoformat()} — plan rejected\n"
-            f"Task: {task}\n"
-            f"Plan written but not approved by human.\n"
-        )
-        return 2
+    return 0
 
-    # ── 3. Parse tasks ────────────────────────────────────────────────────────
-    tasks = _parse_tasks(PLAN_FILE)
-    if not tasks:
+
+def _handle_sensor_failure(failures: list[tuple[str, str]], i: int, total: int, handle) -> int:
+    """Print the sensor-failure stop message, preserve the branch, and return exit code 1."""
+    print(
+        f"[error] Sensors still failing on task {i}/{total}: "
+        f"{', '.join(name for name, _ in failures)}."
+    )
+    print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{total}.")
+    handle.keep()
+    if handle.branch:
         print(
-            f"[error] No numbered tasks found in {PLAN_FILE}. "
-            "The plan must have a '## Tasks' section with items like '1. **title** — …'"
+            f"[loop] Branch '{handle.branch}' preserved — {i - 1} completed "
+            f"task(s) are not lost. Inspect with `git log {handle.branch} --oneline`, "
+            f"or merge manually with `git merge --squash {handle.branch} && git commit`."
         )
-        return 1
+    return 1
 
-    print(f"\n[loop] {len(tasks)} task(s) to implement.")
 
-    # ── 4. Implement task by task (inside sandbox) ────────────────────────────
-    review_critiques: dict[int, str] = {}
-    code_health_issues: dict[int, list[str]] = {}
-    task_narratives: list[dict] = []
+def _run_task_checks(
+    driver: AgentDriver,
+    handle,
+    i: int,
+    total: int,
+    task_text: str,
+    plan_abs: str,
+    agents_abs: str,
+    status_abs: str,
+    task_context: list[str],
+    review_critiques: dict[int, str],
+) -> tuple[dict | None, list[tuple[str, str]]]:
+    """
+    Run sensors, code-health, and adversarial review for a task the worker has
+    already implemented.
 
-    with sandbox.workspace(project_root) as handle:
-        for i, task_text in enumerate(tasks, 1):
-            print(f"\n[worker] Task {i}/{len(tasks)}: {_task_title(task_text)}")
+    Returns (narrative_partial, failures). On success narrative_partial holds
+    the review/code-health/retry fields (the caller still needs to add
+    num/title/summary) and failures is empty. On an unresolved sensor failure
+    narrative_partial is None and failures is non-empty — the caller must stop
+    the loop.
+    """
+    sensor_retry_count = 0
 
-            calls_before, cost_before = run_metrics.calls, run_metrics.cost_usd
-            status_hash_before = _file_hash(status_abs)
-            main_dirty_before = _main_checkout_dirty_paths(project_root, status_abs)
+    failures, attempt = _run_sensors_with_retry(
+        handle.path, i, total, plan_abs, agents_abs, status_abs, driver, context_files=task_context
+    )
+    sensor_retry_count += attempt
+    if failures:
+        return None, failures
 
-            task_concepts = _parse_task_concepts(task_text, project_root)
-            task_context = [agents_abs] + task_concepts
+    # ── Code health (lizard: complexity, size, duplication) ──────────────────
+    findings, code_health_retry_count = _run_code_health_with_retry(
+        handle.path, i, total, plan_abs, agents_abs, status_abs, driver, context_files=task_context
+    )
 
-            worker_prompt = (
-                f"{WORKER_STATIC_INSTRUCTIONS}\n\n"
-                f"Task to implement from {plan_abs} (today: {datetime.now(tz=UTC).date().isoformat()}):\n"
-                f"{task_text}"
-            )
-            worker_result = driver.run(
-                worker_prompt,
-                context_files=task_context,
-                cwd=handle.path,
-            )
+    # ── Adversarial review ────────────────────────────────────────────────────
+    approved, critique, review_attempt, review_sensor_retry_count, failures = (
+        _run_review_with_retry(
+            handle.path,
+            task_text,
+            i,
+            total,
+            plan_abs,
+            agents_abs,
+            status_abs,
+            driver,
+            review_critiques,
+            context_files=task_context,
+        )
+    )
+    sensor_retry_count += review_sensor_retry_count
+    if failures:
+        return None, failures
 
-            if worker_result.exit_code != 0:
-                print(f"[error] Worker failed on task {i}/{len(tasks)}:\n{worker_result.text}")
-                print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
-                return 1  # handle._keep is False → sandbox discards the branch
+    return {
+        "review_approved": approved,
+        "review_reasoning": critique,
+        "code_health_findings": findings,
+        "sensor_retries": sensor_retry_count,
+        "review_retries": review_attempt,
+        "code_health_retries": code_health_retry_count,
+    }, []
 
-            worker_summary = _worker_summary(worker_result.text)
-            sensor_retry_count = 0
-            code_health_retry_count = 0
 
-            if _file_hash(status_abs) == status_hash_before:
-                print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
+def _warn_if_leaked(
+    i: int, total: int, project_root: Path, status_abs: str, main_dirty_before: list[str]
+) -> None:
+    """Warn if the worker wrote to the main checkout instead of its sandboxed worktree."""
+    main_dirty_after = _main_checkout_dirty_paths(project_root, status_abs)
+    leaked = sorted(set(main_dirty_after) - set(main_dirty_before))
+    if leaked:
+        print(
+            f"[warning] Task {i}/{total}: the worker wrote outside its "
+            f"sandboxed worktree, into the main checkout: {', '.join(leaked)}. "
+            f"This should not happen (see AGENTS.md sandboxing gotchas) — "
+            f"inspect and resolve with `git status`/`git diff` before merging."
+        )
 
-            failures, attempt = _run_sensors_with_retry(
-                handle.path, i, len(tasks), plan_abs, agents_abs, status_abs, driver, context_files=task_context
-            )
-            sensor_retry_count += attempt
 
-            if failures:
-                print(
-                    f"[error] Sensors still failing on task {i}/{len(tasks)}: "
-                    f"{', '.join(name for name, _ in failures)}."
-                )
-                print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
-                handle.keep()
-                if handle.branch:
-                    print(
-                        f"[loop] Branch '{handle.branch}' preserved — {i - 1} completed "
-                        f"task(s) are not lost. Inspect with `git log {handle.branch} --oneline`, "
-                        f"or merge manually with `git merge --squash {handle.branch} && git commit`."
-                    )
-                return 1  # handle.keep() called above → branch preserved for manual recovery
+def _print_task_metrics(i: int, total: int, run_metrics: Metrics, calls_before: int, cost_before: float) -> None:
+    task_calls = run_metrics.calls - calls_before
+    task_cost = run_metrics.cost_usd - cost_before
+    print(
+        f"[metrics] Task {i}/{total}: {task_calls} driver call(s), "
+        f"${task_cost:.4f}, session {run_metrics.last_session_id}"
+    )
 
-            # ── Code health (lizard: complexity, size, duplication) ──────────
-            findings, ch_retries = _run_code_health_with_retry(
-                handle.path, i, len(tasks), plan_abs, agents_abs, status_abs, driver, context_files=task_context
-            )
-            code_health_retry_count += ch_retries
-            if findings:
-                code_health_issues[i] = findings
 
-            # ── Adversarial review ──────────────────────────────────────────
-            approved, critique, review_attempt, review_sensor_retry_count, failures = (
-                _run_review_with_retry(
-                    handle.path,
-                    task_text,
-                    i,
-                    len(tasks),
-                    plan_abs,
-                    agents_abs,
-                    status_abs,
-                    driver,
-                    review_critiques,
-                    context_files=task_context,
-                )
-            )
-            sensor_retry_count += review_sensor_retry_count
+def _run_one_task(
+    driver: AgentDriver,
+    handle,
+    i: int,
+    total: int,
+    task_text: str,
+    plan_abs: str,
+    agents_abs: str,
+    status_abs: str,
+    project_root: Path,
+    review_critiques: dict[int, str],
+    run_metrics: Metrics,
+) -> int | tuple[dict, list[str]]:
+    """
+    Implement and validate one task: worker call, sensors, code-health,
+    review, commit, and per-task metrics reporting.
 
-            if failures:
-                print(
-                    f"[error] Sensors still failing on task {i}/{len(tasks)}: "
-                    f"{', '.join(name for name, _ in failures)}."
-                )
-                print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{len(tasks)}.")
-                handle.keep()
-                if handle.branch:
-                    print(
-                        f"[loop] Branch '{handle.branch}' preserved — {i - 1} completed "
-                        f"task(s) are not lost. Inspect with `git log {handle.branch} --oneline`, "
-                        f"or merge manually with `git merge --squash {handle.branch} && git commit`."
-                    )
-                return 1  # handle.keep() called above → branch preserved for manual recovery
+    Returns an exit code (1) if the loop must stop — a worker failure (branch
+    discarded, handle.keep() not called) or unresolved sensor failures
+    (branch preserved via _handle_sensor_failure) — or (narrative,
+    code_health_findings) on success.
+    """
+    print(f"\n[worker] Task {i}/{total}: {_task_title(task_text)}")
 
-            task_narratives.append(
-                {
-                    "num": i,
-                    "title": _task_title(task_text),
-                    "summary": worker_summary,
-                    "review_approved": approved,
-                    "review_reasoning": critique,
-                    "code_health_findings": findings,
-                    "sensor_retries": sensor_retry_count,
-                    "review_retries": review_attempt,
-                    "code_health_retries": code_health_retry_count,
-                }
-            )
+    calls_before, cost_before = run_metrics.calls, run_metrics.cost_usd
+    status_hash_before = _file_hash(status_abs)
+    main_dirty_before = _main_checkout_dirty_paths(project_root, status_abs)
 
-            main_dirty_after = _main_checkout_dirty_paths(project_root, status_abs)
-            leaked = sorted(set(main_dirty_after) - set(main_dirty_before))
-            if leaked:
-                print(
-                    f"[warning] Task {i}/{len(tasks)}: the worker wrote outside its "
-                    f"sandboxed worktree, into the main checkout: {', '.join(leaked)}. "
-                    f"This should not happen (see AGENTS.md sandboxing gotchas) — "
-                    f"inspect and resolve with `git status`/`git diff` before merging."
-                )
+    task_concepts = _parse_task_concepts(task_text, project_root)
+    task_context = [agents_abs] + task_concepts
 
-            _commit_task(i, _task_title(task_text), handle.path)
+    worker_prompt = (
+        f"{WORKER_STATIC_INSTRUCTIONS}\n\n"
+        f"Task to implement from {plan_abs} (today: {datetime.now(tz=UTC).date().isoformat()}):\n"
+        f"{task_text}"
+    )
+    worker_result = driver.run(worker_prompt, context_files=task_context, cwd=handle.path)
 
-            task_calls = run_metrics.calls - calls_before
-            task_cost = run_metrics.cost_usd - cost_before
-            print(
-                f"[metrics] Task {i}/{len(tasks)}: {task_calls} driver call(s), "
-                f"${task_cost:.4f}, session {run_metrics.last_session_id}"
-            )
+    if worker_result.exit_code != 0:
+        print(f"[error] Worker failed on task {i}/{total}:\n{worker_result.text}")
+        print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{total}.")
+        return 1  # handle._keep is False → sandbox discards the branch
 
-        handle.keep()  # all tasks complete → preserve the branch for merge
+    worker_summary = _worker_summary(worker_result.text)
+    if _file_hash(status_abs) == status_hash_before:
+        print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
 
+    narrative_partial, failures = _run_task_checks(
+        driver, handle, i, total, task_text, plan_abs, agents_abs, status_abs, task_context, review_critiques
+    )
+    if narrative_partial is None:
+        return _handle_sensor_failure(failures, i, total, handle)
+
+    narrative = {"num": i, "title": _task_title(task_text), "summary": worker_summary, **narrative_partial}
+
+    _warn_if_leaked(i, total, project_root, status_abs, main_dirty_before)
+    _commit_task(i, _task_title(task_text), handle.path)
+    _print_task_metrics(i, total, run_metrics, calls_before, cost_before)
+
+    return narrative, narrative_partial["code_health_findings"]
+
+
+def _finalize_run(
+    task: str,
+    task_narratives: list[dict],
+    project_root: Path,
+    run_timestamp: str,
+    handle,
+    review_critiques: dict[int, str],
+    code_health_issues: dict[int, list[str]],
+    run_metrics: Metrics,
+) -> None:
+    """Write the run narrative, offer a merge, and print/append final metrics."""
     narrative_content = _build_narrative(task, task_narratives)
     narrative_path = _write_narrative(project_root, run_timestamp, narrative_content)
 
@@ -1007,6 +1057,102 @@ def run_loop(task: str) -> int:
     _append_status(
         f"\n**Run metrics:** {run_metrics.calls} driver call(s), "
         f"${run_metrics.cost_usd:.4f}, session {run_metrics.last_session_id}\n"
+    )
+
+
+def _implement_tasks(
+    driver: AgentDriver,
+    sandbox,
+    tasks: list[str],
+    plan_abs: str,
+    agents_abs: str,
+    status_abs: str,
+    project_root: Path,
+    run_metrics: Metrics,
+):
+    """
+    Implement all tasks inside one sandbox workspace, one task at a time.
+
+    Returns (exit_code, handle, task_narratives, review_critiques,
+    code_health_issues). exit_code is None on success, with handle.keep()
+    already called; otherwise the caller should return exit_code immediately
+    (the failing task already handled its own branch-preservation decision).
+    """
+    review_critiques: dict[int, str] = {}
+    code_health_issues: dict[int, list[str]] = {}
+    task_narratives: list[dict] = []
+
+    with sandbox.workspace(project_root) as handle:
+        for i, task_text in enumerate(tasks, 1):
+            result = _run_one_task(
+                driver, handle, i, len(tasks), task_text, plan_abs, agents_abs, status_abs,
+                project_root, review_critiques, run_metrics,
+            )
+            if isinstance(result, int):
+                return result, handle, task_narratives, review_critiques, code_health_issues
+
+            narrative, findings = result
+            if findings:
+                code_health_issues[i] = findings
+            task_narratives.append(narrative)
+
+        handle.keep()  # all tasks complete → preserve the branch for merge
+
+    return None, handle, task_narratives, review_critiques, code_health_issues
+
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+
+def run_loop(task: str) -> int:
+    """
+    Execute one plan → approve → implement cycle, implementing one task at a time.
+    Returns exit code (0 = success, 1 = error, 2 = rejected by human).
+    """
+    driver = get_driver()
+    run_metrics = Metrics()
+    driver = _MeteredDriver(driver, run_metrics)
+    gate = get_gate()
+    sandbox = get_sandbox()
+
+    project_root = Path.cwd().resolve()
+    plan_abs = str(project_root / PLAN_FILE)
+    agents_abs = str(project_root / AGENTS_MD)
+    status_abs = str(project_root / STATUS_MD)
+    run_timestamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
+
+    exit_code = _generate_plan(driver, task)
+    if exit_code != 0:
+        return exit_code
+
+    approved = gate.request(PLAN_FILE)
+    if not approved:
+        print("[loop] Plan rejected — exiting without changes.")
+        _append_status(
+            f"\n## {datetime.now(tz=UTC).date().isoformat()} — plan rejected\n"
+            f"Task: {task}\n"
+            f"Plan written but not approved by human.\n"
+        )
+        return 2
+
+    tasks = _parse_tasks(PLAN_FILE)
+    if not tasks:
+        print(
+            f"[error] No numbered tasks found in {PLAN_FILE}. "
+            "The plan must have a '## Tasks' section with items like '1. **title** — …'"
+        )
+        return 1
+
+    print(f"\n[loop] {len(tasks)} task(s) to implement.")
+
+    exit_code, handle, task_narratives, review_critiques, code_health_issues = _implement_tasks(
+        driver, sandbox, tasks, plan_abs, agents_abs, status_abs, project_root, run_metrics,
+    )
+    if exit_code is not None:
+        return exit_code
+
+    _finalize_run(
+        task, task_narratives, project_root, run_timestamp, handle,
+        review_critiques, code_health_issues, run_metrics,
     )
 
     print(f"\n[loop] All {len(tasks)} tasks complete.")

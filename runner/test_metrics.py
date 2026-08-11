@@ -74,7 +74,9 @@ class TestMeteredDriver:
 
         result = driver.run_subagent("planner", "prompt")
 
-        inner.run_subagent.assert_called_once_with("planner", "prompt", cwd=None)
+        inner.run_subagent.assert_called_once_with(
+            "planner", "prompt", context_files=None, cwd=None
+        )
         assert result == inner.run_subagent.return_value
 
     def test_run_subagent_forwards_cwd(self):
@@ -86,7 +88,7 @@ class TestMeteredDriver:
         result = driver.run_subagent("reviewer", "prompt", cwd=Path("/tmp"))
 
         inner.run_subagent.assert_called_once_with(
-            "reviewer", "prompt", cwd=Path("/tmp")
+            "reviewer", "prompt", context_files=None, cwd=Path("/tmp")
         )
         assert result == inner.run_subagent.return_value
 

@@ -24,10 +24,10 @@ The prompt contains:
 
 ## How to review
 
-1. Read `AGENTS.md` (relative path — your working directory is the worktree the task ran in) to understand this project's conventions.
-2. Compare the diff against the task description: does it do what was asked, fully and only that?
-3. Use Read, Glob, and Grep to inspect the surrounding code in the worktree — not just the diff in isolation. Check whether the change fits existing patterns, naming, and structure nearby, and whether it duplicates or contradicts something already there.
-4. Check the diff against `AGENTS.md`'s conventions specifically (testing conventions, design rules, gotchas).
+1. AGENTS.md conventions are pre-injected in your context.
+2. Note that syntax, linting, type checks, and unit tests have already passed computational sensors prior to this step. Your focus is high-level adversarial review: problem fit, scope creep, and architectural design patterns.
+3. Compare the diff against the task description and AGENTS.md conventions. If the diff and AGENTS.md provide sufficient information to form a conclusive verdict, output your verdict directly without making tool calls.
+4. Only use Read, Glob, or Grep if you genuinely need to inspect surrounding codebase files in the worktree (e.g., checking caller sites or coupled modules).
 
 ## Output format
 

@@ -33,6 +33,7 @@ class AgentDriver(ABC):
         self,
         agent_name: str,
         prompt: str,
+        context_files: list[str] | None = None,
         cwd: Path | None = None,
     ) -> AgentResult:
         """

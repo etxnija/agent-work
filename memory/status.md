@@ -731,5 +731,7 @@ worktree-isolation root cause is also still open if it's worth another look.
 - Refined `agents/reviewer.md` instructions: clarified that mechanical checks (tests, syntax, types, lint) are pre-verified by computational sensors, instructing the reviewer to form its adversarial verdict directly from the diff and `AGENTS.md` without making exploratory tool calls unless inspecting surrounding caller sites is genuinely required.
 - Added `MAX_DIFF_LINES = 500` truncation in `_task_diff()` in `runner/loop.py` to prevent giant diffs from flooding the review prompt context.
 - Added unit tests in `runner/drivers/test_claude.py` and `runner/test_loop.py`. All 219 pytest cases passing cleanly.
+- Tightened `agents/reviewer.md` "How to review" instructions: explicitly bounded independent exploration (1 to 3 targeted `Read`/`Grep` checks max), established division of labor with sensors (never re-derive mechanical test/lint/health passes), and instructed the reviewer to treat excessive exploration needs as a signal of implementation opacity rather than thoroughness.
+
 
 

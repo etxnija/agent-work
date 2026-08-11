@@ -23,6 +23,16 @@ def _commit_on_feature_branch(path: Path) -> None:
                     check=True, capture_output=True, env=env)
 
 
+def _violation_content() -> str:
+    lines = ["def alpha(x):", "    result = 0"]
+    for i in range(1, 56):
+        lines.append(f"    result += x * {i}")
+    lines.append("    return result")
+    body_a = "\n".join(lines)
+    body_b = body_a.replace("alpha", "beta")
+    return body_a + "\n\n\n" + body_b + "\n"
+
+
 class TestParseMetricFindings:
     def test_blank_row_is_skipped(self):
         assert _parse_metric_findings("\n") == []
@@ -92,3 +102,29 @@ class TestCheckCodeHealth:
         _init_repo(tmp_path)
 
         assert check_code_health(tmp_path) == []
+
+    def test_test_file_with_violations_produces_no_findings(self, tmp_path):
+        _init_repo(tmp_path)
+        (tmp_path / "test_something.py").write_text(_violation_content())
+        _commit_on_feature_branch(tmp_path)
+
+        assert check_code_health(tmp_path) == []
+
+    def test_non_test_file_with_same_content_is_flagged(self, tmp_path):
+        _init_repo(tmp_path)
+        (tmp_path / "real_module.py").write_text(_violation_content())
+        _commit_on_feature_branch(tmp_path)
+
+        assert check_code_health(tmp_path) != []
+
+    def test_mixed_changeset_only_non_test_file_is_flagged(self, tmp_path):
+        _init_repo(tmp_path)
+        (tmp_path / "test_foo.py").write_text(_violation_content())
+        (tmp_path / "production.py").write_text(_violation_content())
+        _commit_on_feature_branch(tmp_path)
+
+        findings = check_code_health(tmp_path)
+
+        assert findings != []
+        assert all("production.py" in f for f in findings)
+        assert not any("test_foo.py" in f for f in findings)

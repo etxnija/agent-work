@@ -27,7 +27,12 @@ def _changed_files(worktree: Path) -> list[str]:
         check=False,
     )
     candidates = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    return [f for f in candidates if (worktree / f).exists()]
+    return [
+        f
+        for f in candidates
+        if (worktree / f).exists()
+        and not (Path(f).name.startswith("test_") and Path(f).name.endswith(".py"))
+    ]
 
 
 def _parse_metric_findings(csv_text: str) -> list[str]:

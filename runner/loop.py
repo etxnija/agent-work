@@ -107,6 +107,33 @@ def _task_title(task_text: str) -> str:
     return re.sub(r'^\d+\.\s+', '', first_line)[:80]
 
 
+def _parse_task_concepts(task_text: str, project_root: Path) -> list[str]:
+    """
+    Extract specified concept file paths from a task's 'Concepts:' line in plan.md.
+
+    Returns absolute path strings for existing concept files under memory/concepts/.
+    """
+    match = re.search(r'^\s*Concepts:\s*(.+)$', task_text, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return []
+
+    concepts_dir = project_root / "memory" / "concepts"
+    if not concepts_dir.exists():
+        return []
+
+    results = []
+    for raw in match.group(1).split(","):
+        name = raw.strip()
+        if not name:
+            continue
+        if not name.endswith(".md"):
+            name = f"{name}.md"
+        candidate = concepts_dir / name
+        if candidate.exists():
+            results.append(str(candidate))
+    return results
+
+
 def _main_checkout_dirty_paths(project_root: Path, status_abs: str) -> list[str]:
     """
     Return paths (relative to project_root) with uncommitted changes in the main
@@ -158,6 +185,7 @@ def _run_sensors_with_retry(
     agents_abs: str,
     status_abs: str,
     driver: AgentDriver,
+    context_files: list[str] | None = None,
 ) -> tuple[list[tuple[str, str]], int]:
     """
     Run sensors, retrying up to SENSOR_RETRY_LIMIT times with a corrective
@@ -169,6 +197,7 @@ def _run_sensors_with_retry(
     """
     failures = _run_sensors(worktree)
     attempt = 0
+    ctx = context_files if context_files is not None else [agents_abs]
     while failures and attempt < SENSOR_RETRY_LIMIT:
         attempt += 1
         print(
@@ -186,7 +215,7 @@ def _run_sensors_with_retry(
         )
         corrective_result = driver.run(
             corrective_prompt,
-            context_files=[plan_abs, agents_abs, status_abs],
+            context_files=ctx,
             cwd=worktree,
         )
         if corrective_result.exit_code != 0:
@@ -209,6 +238,7 @@ def _run_code_health_with_retry(
     agents_abs: str,
     status_abs: str,
     driver: AgentDriver,
+    context_files: list[str] | None = None,
 ) -> tuple[list[str], int]:
     """
     Run the lizard-based code-health check, retrying up to
@@ -223,6 +253,7 @@ def _run_code_health_with_retry(
     """
     findings = check_code_health(worktree)
     attempt = 0
+    ctx = context_files if context_files is not None else [agents_abs]
     while findings and attempt < CODE_HEALTH_RETRY_LIMIT:
         attempt += 1
         print(
@@ -239,7 +270,7 @@ def _run_code_health_with_retry(
         )
         corrective_result = driver.run(
             corrective_prompt,
-            context_files=[plan_abs, agents_abs, status_abs],
+            context_files=ctx,
             cwd=worktree,
         )
         if corrective_result.exit_code != 0:
@@ -264,6 +295,7 @@ def _run_review_with_retry(
     status_abs: str,
     driver: AgentDriver,
     review_critiques: dict[int, str],
+    context_files: list[str] | None = None,
 ) -> tuple[bool, str, int, int, list[tuple[str, str]]]:
     """
     Run the adversarial-review cycle for one task, retrying up to
@@ -279,6 +311,7 @@ def _run_review_with_retry(
     """
     review_attempt = 0
     sensor_retry_count = 0
+    ctx = context_files if context_files is not None else [agents_abs]
     while True:
         diff = _task_diff(worktree)
         review_prompt = (
@@ -315,7 +348,7 @@ def _run_review_with_retry(
         )
         corrective_result = driver.run(
             corrective_prompt,
-            context_files=[plan_abs, agents_abs, status_abs],
+            context_files=ctx,
             cwd=worktree,
         )
         if corrective_result.exit_code != 0:
@@ -327,7 +360,7 @@ def _run_review_with_retry(
             return approved, critique, review_attempt, sensor_retry_count, []
 
         failures, attempt = _run_sensors_with_retry(
-            worktree, i, total, plan_abs, agents_abs, status_abs, driver
+            worktree, i, total, plan_abs, agents_abs, status_abs, driver, context_files=ctx
         )
         sensor_retry_count += attempt
         if failures:
@@ -777,6 +810,9 @@ def run_loop(task: str) -> int:
             status_hash_before = _file_hash(status_abs)
             main_dirty_before = _main_checkout_dirty_paths(project_root, status_abs)
 
+            task_concepts = _parse_task_concepts(task_text, project_root)
+            task_context = [agents_abs] + task_concepts
+
             worker_prompt = (
                 f"Implement this specific task from the approved plan in {plan_abs}:\n\n"
                 f"{task_text}\n\n"
@@ -789,7 +825,7 @@ def run_loop(task: str) -> int:
             )
             worker_result = driver.run(
                 worker_prompt,
-                context_files=[plan_abs, agents_abs, status_abs],
+                context_files=task_context,
                 cwd=handle.path,
             )
 
@@ -806,7 +842,7 @@ def run_loop(task: str) -> int:
                 print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
 
             failures, attempt = _run_sensors_with_retry(
-                handle.path, i, len(tasks), plan_abs, agents_abs, status_abs, driver
+                handle.path, i, len(tasks), plan_abs, agents_abs, status_abs, driver, context_files=task_context
             )
             sensor_retry_count += attempt
 
@@ -827,7 +863,7 @@ def run_loop(task: str) -> int:
 
             # ── Code health (lizard: complexity, size, duplication) ──────────
             findings, ch_retries = _run_code_health_with_retry(
-                handle.path, i, len(tasks), plan_abs, agents_abs, status_abs, driver
+                handle.path, i, len(tasks), plan_abs, agents_abs, status_abs, driver, context_files=task_context
             )
             code_health_retry_count += ch_retries
             if findings:
@@ -845,6 +881,7 @@ def run_loop(task: str) -> int:
                     status_abs,
                     driver,
                     review_critiques,
+                    context_files=task_context,
                 )
             )
             sensor_retry_count += review_sensor_retry_count

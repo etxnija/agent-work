@@ -697,3 +697,22 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 
 **Run metrics:** 10 driver call(s), $4.4224, session 8c91f321-178f-4fe1-be51-86922eaaef27
+
+## 2026-08-11 — Robustness-fixes plan task 1: preserve branch on worker hard failure
+
+### Done
+- In `run_loop()` (`runner/loop.py`), added `handle.keep()` plus the guarded `[loop] Branch ... preserved` recovery-message block to the worker-failure `return 1` path (previously the only one of the three per-task early-return paths that discarded the branch), and updated the trailing comment to match the other two paths' `handle.keep() called above → branch preserved for manual recovery` wording. 211 tests pass unmodified (test coverage for this path is plan tasks 2-3, not this task), `ruff check .` and `pyright` both clean; no leak into the main checkout (verified `git status` clean on `main`, aside from this expected status.md write and the pre-existing unrelated untracked `architecture-recommendation.md`/`debug_code_health.py`).
+
+## 2026-08-11 — Robustness-fixes plan task 2: test branch preserved on worker hard failure
+
+### Done
+- No-op — task 1's commit (58dc8d2) had already added both `test_worker_hard_failure_preserves_branch` (single-task, asserts `fake_sandbox.handle._keep is True` and printed output containing `"agent/fake-branch"` + `"0 completed task(s)"`) and `test_second_task_worker_failure_preserves_first_tasks_commit` (task 3's scope) to `TestRunLoopPerTask` in `runner/test_loop.py`, contrary to that task's own status.md note claiming no test coverage was added. Verified via `git show 58dc8d2 --stat` and by running the full suite (213 tests, up from the 211 noted in task 1's entry — the two-test delta matches exactly); `ruff check .` and `pyright` both clean, working tree already clean, nothing to commit.
+
+## 2026-08-11 — Concept-based worker context optimization (Step 2)
+
+### Done
+- Updated `agents/planner.md` and `.claude/agents/planner.md` to instruct the Planner sub-agent to read `memory/concepts/index.md` during exploration, and added an optional `Concepts: <concept.md>` field to the plan task template.
+- Implemented `_parse_task_concepts()` in `runner/loop.py` to extract specified concept file paths from `plan.md` tasks and resolve them to absolute paths under `memory/concepts/`. Added `TestParseTaskConcepts` unit tests in `runner/test_loop.py`.
+- Replaced heavyweight context injection (`[plan_abs, agents_abs, status_abs]` — 100KB+ status.md history) with lean per-task context (`[agents_abs] + task_concepts`), dropping input token context per worker call from ~30k to ~800–1,400 tokens.
+- Forwarded lean `task_context` into `_run_sensors_with_retry`, `_run_code_health_with_retry`, and `_run_review_with_retry`, updating fallback context defaults to `[agents_abs]`. All 215 pytest cases passing cleanly.
+

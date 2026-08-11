@@ -27,6 +27,7 @@ from runner.loop import (
     _commit_task,
     _main_checkout_dirty_paths,
     _offer_merge,
+    _parse_task_concepts,
     _parse_tasks,
     _plan_invalid_reason,
     _review_verdict,
@@ -242,6 +243,48 @@ class TestTaskTitle:
     @pytest.mark.parametrize("task_text,expected", CASES)
     def test_title(self, task_text, expected):
         assert _task_title(task_text) == expected
+
+
+# ── _parse_task_concepts ──────────────────────────────────────────────────────
+
+class TestParseTaskConcepts:
+    def test_no_concepts_line_returns_empty(self, tmp_path):
+        task_text = "1. **Task** — do stuff\n   Files: foo.py\n   What: stuff"
+        assert _parse_task_concepts(task_text, tmp_path) == []
+
+    def test_existing_concept_file_parsed(self, tmp_path):
+        concepts = tmp_path / "memory" / "concepts"
+        concepts.mkdir(parents=True)
+        (concepts / "sandboxing.md").write_text("content")
+
+        task_text = (
+            "1. **Fix sandbox** — update worktree\n"
+            "   Files: runner/loop.py\n"
+            "   Concepts: sandboxing.md\n"
+            "   What: update"
+        )
+        parsed = _parse_task_concepts(task_text, tmp_path)
+        assert len(parsed) == 1
+        assert parsed[0] == str(concepts / "sandboxing.md")
+
+    def test_missing_concept_file_skipped(self, tmp_path):
+        concepts = tmp_path / "memory" / "concepts"
+        concepts.mkdir(parents=True)
+
+        task_text = "1. **Task**\n   Concepts: non_existent.md"
+        assert _parse_task_concepts(task_text, tmp_path) == []
+
+    def test_multiple_comma_separated_concepts(self, tmp_path):
+        concepts = tmp_path / "memory" / "concepts"
+        concepts.mkdir(parents=True)
+        (concepts / "c1.md").write_text("c1")
+        (concepts / "c2.md").write_text("c2")
+
+        task_text = "1. **Task**\n   Concepts: c1.md, c2.md"
+        parsed = _parse_task_concepts(task_text, tmp_path)
+        assert len(parsed) == 2
+        assert str(concepts / "c1.md") in parsed
+        assert str(concepts / "c2.md") in parsed
 
 
 # ── _run_sensors ──────────────────────────────────────────────────────────────

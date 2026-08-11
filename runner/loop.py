@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -252,6 +253,8 @@ def _run_sensors_with_retry(
     fail-closed itself, that's the caller's job); attempt is the number of
     retries used, 0 when sensors passed on the first try.
     """
+    print(f"[sensor:start] Task {i}/{total}: Running sensors (lint.sh, test.sh, lsp.sh)...")
+    sys.stdout.flush()
     failures = _run_sensors(worktree)
     attempt = 0
     ctx = context_files if context_files is not None else [agents_abs]
@@ -262,6 +265,7 @@ def _run_sensors_with_retry(
             f"{', '.join(name for name, _ in failures)} failed "
             f"(attempt {attempt}/{SENSOR_RETRY_LIMIT})."
         )
+        sys.stdout.flush()
         formatted_failures = "\n\n".join(
             f"### {name}\n{output}" for name, output in failures
         )
@@ -279,9 +283,15 @@ def _run_sensors_with_retry(
                 f"[error] Corrective worker call failed on task {i}/{total}:\n"
                 f"{corrective_result.text}"
             )
+            sys.stdout.flush()
             break
 
         failures = _run_sensors(worktree)
+
+    if not failures:
+        attempt_str = "1st attempt" if attempt == 0 else f"attempt {attempt + 1}"
+        print(f"[sensor:done]  Task {i}/{total}: OK (passed on {attempt_str})")
+        sys.stdout.flush()
 
     return failures, attempt
 
@@ -307,6 +317,8 @@ def _run_code_health_with_retry(
     findings is the (possibly still non-empty) list of remaining findings;
     attempt is the number of retries used, 0 when clean on the first try.
     """
+    print(f"[code-health:start] Task {i}/{total}: Running code health checks (lizard)...")
+    sys.stdout.flush()
     findings = check_code_health(worktree)
     attempt = 0
     ctx = context_files if context_files is not None else [agents_abs]
@@ -316,6 +328,7 @@ def _run_code_health_with_retry(
             f"[code-health] Task {i}/{total}: {len(findings)} finding(s) "
             f"(attempt {attempt}/{CODE_HEALTH_RETRY_LIMIT})."
         )
+        sys.stdout.flush()
         formatted_findings = "\n".join(
             f"{n}. {finding}" for n, finding in enumerate(findings, start=1)
         )
@@ -333,9 +346,17 @@ def _run_code_health_with_retry(
                 f"[error] Corrective worker call failed on task {i}/{total}:\n"
                 f"{corrective_result.text}"
             )
+            sys.stdout.flush()
             break
 
         findings = check_code_health(worktree)
+
+    if findings:
+        print(f"[code-health:done] Task {i}/{total}: {len(findings)} finding(s) remaining")
+    else:
+        attempt_str = "1st attempt" if attempt == 0 else f"attempt {attempt + 1}"
+        print(f"[code-health:done] Task {i}/{total}: OK (0 findings on {attempt_str})")
+    sys.stdout.flush()
 
     return findings, attempt
 
@@ -370,6 +391,7 @@ def _apply_review_corrective(
             f"[error] Corrective worker call failed on task {i}/{total}:\n"
             f"{corrective_result.text}"
         )
+        sys.stdout.flush()
         return False
     return True
 
@@ -402,10 +424,14 @@ def _run_review_with_retry(
     sensor_retry_count = 0
     ctx = context_files if context_files is not None else [agents_abs]
     while True:
+        print(f"[review:start] Task {i}/{total}: Running adversarial review ({REVIEWER_AGENT})...")
+        sys.stdout.flush()
         approved, critique = _run_single_review(driver, worktree, task_text, context_files=ctx)
 
         if approved:
             review_critiques.pop(i, None)
+            print(f"[review:done]  Task {i}/{total}: APPROVED — \"{critique}\"")
+            sys.stdout.flush()
             return approved, critique, review_attempt, sensor_retry_count, []
 
         if review_attempt >= REVIEW_RETRY_LIMIT:
@@ -414,6 +440,7 @@ def _run_review_with_retry(
                 f"({REVIEW_RETRY_LIMIT}/{REVIEW_RETRY_LIMIT}) — committing with "
                 f"outstanding critique."
             )
+            sys.stdout.flush()
             review_critiques[i] = critique
             return approved, critique, review_attempt, sensor_retry_count, []
 
@@ -422,6 +449,9 @@ def _run_review_with_retry(
             f"[review] Task {i}/{total}: changes requested "
             f"(attempt {review_attempt}/{REVIEW_RETRY_LIMIT})."
         )
+        sys.stdout.flush()
+        print(f"[worker:corrective] Task {i}/{total}: Applying reviewer correction...")
+        sys.stdout.flush()
         if not _apply_review_corrective(driver, critique, ctx, worktree, i, total):
             review_critiques[i] = critique
             return approved, critique, review_attempt, sensor_retry_count, []
@@ -811,8 +841,9 @@ def _generate_plan(driver: AgentDriver, task: str) -> int:
     success, 1 on error (planner crash, missing plan.md, or a plan still
     invalid after PLANNER_RETRY_LIMIT retries).
     """
-    print(f"\n[planner] Task: {task!r}")
-    print("[planner] Exploring codebase…")
+    print(f"\n[planner:start] Task: {task!r}")
+    print("[planner:start] Exploring codebase and writing plan...")
+    sys.stdout.flush()
 
     plan_result = driver.run_subagent(
         PLANNER_AGENT,
@@ -828,7 +859,10 @@ def _generate_plan(driver: AgentDriver, task: str) -> int:
     invalid_reason = _plan_invalid_reason(plan_result.text, PLAN_FILE)
     while invalid_reason is not None and attempt < PLANNER_RETRY_LIMIT:
         attempt += 1
-        print(f"[planner] Plan invalid (attempt {attempt}/{PLANNER_RETRY_LIMIT}): {invalid_reason}")
+        print(
+            f"[planner:warn]  Plan invalid (attempt {attempt}/{PLANNER_RETRY_LIMIT}): {invalid_reason}"
+        )
+        sys.stdout.flush()
 
         corrective_prompt = (
             f"Task: {task}\n\n"
@@ -850,8 +884,12 @@ def _generate_plan(driver: AgentDriver, task: str) -> int:
             f"[error] Planner still produced an invalid plan after "
             f"{PLANNER_RETRY_LIMIT} retries: {invalid_reason}"
         )
+        sys.stdout.flush()
         return 1
 
+    planner_cost_str = f" (${plan_result.cost_usd:.4f})" if plan_result.cost_usd is not None else ""
+    print(f"[planner:done]  Plan written to {PLAN_FILE}{planner_cost_str}")
+    sys.stdout.flush()
     return 0
 
 
@@ -862,6 +900,7 @@ def _handle_sensor_failure(failures: list[tuple[str, str]], i: int, total: int, 
         f"{', '.join(name for name, _ in failures)}."
     )
     print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{total}.")
+    sys.stdout.flush()
     handle.keep()
     if handle.branch:
         print(
@@ -869,6 +908,7 @@ def _handle_sensor_failure(failures: list[tuple[str, str]], i: int, total: int, 
             f"task(s) are not lost. Inspect with `git log {handle.branch} --oneline`, "
             f"or merge manually with `git merge --squash {handle.branch} && git commit`."
         )
+        sys.stdout.flush()
     return 1
 
 
@@ -950,6 +990,7 @@ def _warn_if_leaked(
             f"This should not happen (see AGENTS.md sandboxing gotchas) — "
             f"inspect and resolve with `git status`/`git diff` before merging."
         )
+        sys.stdout.flush()
 
 
 def _print_task_metrics(i: int, total: int, run_metrics: Metrics, calls_before: int, cost_before: float) -> None:
@@ -959,6 +1000,7 @@ def _print_task_metrics(i: int, total: int, run_metrics: Metrics, calls_before: 
         f"[metrics] Task {i}/{total}: {task_calls} driver call(s), "
         f"${task_cost:.4f}, session {run_metrics.last_session_id}"
     )
+    sys.stdout.flush()
 
 
 def _run_one_task(
@@ -983,14 +1025,16 @@ def _run_one_task(
     (branch preserved via _handle_sensor_failure) — or (narrative,
     code_health_findings) on success.
     """
-    print(f"\n[worker] Task {i}/{total}: {_task_title(task_text)}")
+    task_concepts = _parse_task_concepts(task_text, project_root)
+    task_context = [agents_abs] + task_concepts
+    concepts_str = f" (Concepts: {', '.join(Path(c).name for c in task_concepts)})" if task_concepts else ""
+
+    print(f"\n[worker:start]  Task {i}/{total}: {_task_title(task_text)}{concepts_str}")
+    sys.stdout.flush()
 
     calls_before, cost_before = run_metrics.calls, run_metrics.cost_usd
     status_hash_before = _file_hash(status_abs)
     main_dirty_before = _main_checkout_dirty_paths(project_root, status_abs)
-
-    task_concepts = _parse_task_concepts(task_text, project_root)
-    task_context = [agents_abs] + task_concepts
 
     worker_prompt = (
         f"{WORKER_STATIC_INSTRUCTIONS}\n\n"
@@ -1002,11 +1046,17 @@ def _run_one_task(
     if worker_result.exit_code != 0:
         print(f"[error] Worker failed on task {i}/{total}:\n{worker_result.text}")
         print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{total}.")
+        sys.stdout.flush()
         return 1  # handle._keep is False → sandbox discards the branch
 
     worker_summary = _worker_summary(worker_result.text)
+    cost_str = f" (${worker_result.cost_usd:.4f})" if worker_result.cost_usd is not None else ""
+    print(f"[worker:done]   Task {i}/{total}: OK{cost_str} — \"{worker_summary}\"")
+    sys.stdout.flush()
+
     if _file_hash(status_abs) == status_hash_before:
         print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
+        sys.stdout.flush()
 
     narrative_partial, failures = _run_task_checks(
         driver, handle, i, total, task_text, plan_abs, agents_abs, status_abs, task_context, review_critiques

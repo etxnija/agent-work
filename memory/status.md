@@ -733,5 +733,13 @@ worktree-isolation root cause is also still open if it's worth another look.
 - Added unit tests in `runner/drivers/test_claude.py` and `runner/test_loop.py`. All 219 pytest cases passing cleanly.
 - Tightened `agents/reviewer.md` "How to review" instructions: explicitly bounded independent exploration (1 to 3 targeted `Read`/`Grep` checks max), established division of labor with sensors (never re-derive mechanical test/lint/health passes), and instructed the reviewer to treat excessive exploration needs as a signal of implementation opacity rather than thoroughness.
 
+## 2026-08-11 — Real-Time Progress Logging & Output Flushing
+
+### Done
+- Added explicit `:start` and `:done` logging tags across `_generate_plan`, `_run_one_task`, `_run_sensors_with_retry`, `_run_code_health_with_retry`, and `_run_review_with_retry` in `runner/loop.py`.
+- Added immediate `sys.stdout.flush()` after printing start/done log lines so task titles, active steps, worker summaries, and review verdicts appear instantly on screen before blocking sub-agent calls begin.
+- Preserved backward-compatible tag strings for existing mock assertion tests (all 219 tests passing cleanly).
+
+
 
 

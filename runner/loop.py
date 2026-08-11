@@ -42,6 +42,35 @@ REVIEW_APPROVED_SIGNAL = "REVIEW: APPROVED"
 REVIEW_CHANGES_SIGNAL = "REVIEW: CHANGES REQUESTED"
 REVIEW_RETRY_LIMIT = 2
 
+WORKER_STATIC_INSTRUCTIONS = (
+    "You are an autonomous software engineering worker implementing a single task.\n"
+    "Follow these rules strictly:\n"
+    "1. Follow all conventions in AGENTS.md.\n"
+    "2. Implement only the assigned task — do not work ahead to other tasks.\n"
+    "3. After completing, append a one-line summary of what you did to memory/status.md.\n"
+    "4. End your response with a line starting with 'SUMMARY: ' followed by one sentence on what changed and why."
+)
+
+SENSOR_CORRECTIVE_INSTRUCTIONS = (
+    "Your last change to this task produced sensor issues. "
+    "Fix these issues and nothing else."
+)
+
+CODE_HEALTH_CORRECTIVE_INSTRUCTIONS = (
+    "Your last change to this task has code-health issues. "
+    "Fix these issues and nothing else."
+)
+
+REVIEW_CORRECTIVE_INSTRUCTIONS = (
+    "A reviewer requested changes to your last change for this task. "
+    "Fix these requested changes and nothing else."
+)
+
+REVIEWER_STATIC_INSTRUCTIONS = (
+    "Review this task's diff against the task description and against "
+    "this repo's AGENTS.md conventions."
+)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -237,9 +266,8 @@ def _run_sensors_with_retry(
             f"### {name}\n{output}" for name, output in failures
         )
         corrective_prompt = (
-            f"Your last change to this task produced these issues:\n\n"
-            f"{formatted_failures}\n\n"
-            f"Fix them and nothing else."
+            f"{SENSOR_CORRECTIVE_INSTRUCTIONS}\n\n"
+            f"{formatted_failures}"
         )
         corrective_result = driver.run(
             corrective_prompt,
@@ -292,9 +320,8 @@ def _run_code_health_with_retry(
             f"{n}. {finding}" for n, finding in enumerate(findings, start=1)
         )
         corrective_prompt = (
-            f"Your last change to this task has these code-health issues:\n\n"
-            f"{formatted_findings}\n\n"
-            f"Fix them and nothing else."
+            f"{CODE_HEALTH_CORRECTIVE_INSTRUCTIONS}\n\n"
+            f"{formatted_findings}"
         )
         corrective_result = driver.run(
             corrective_prompt,
@@ -343,8 +370,7 @@ def _run_review_with_retry(
     while True:
         diff = _task_diff(worktree)
         review_prompt = (
-            f"Review this task's diff against the task description and against "
-            f"this repo's AGENTS.md conventions.\n\n"
+            f"{REVIEWER_STATIC_INSTRUCTIONS}\n\n"
             f"Task:\n{task_text}\n\n"
             f"Diff:\n```diff\n{diff}\n```"
         )
@@ -370,9 +396,8 @@ def _run_review_with_retry(
             f"(attempt {review_attempt}/{REVIEW_RETRY_LIMIT})."
         )
         corrective_prompt = (
-            f"A reviewer requested changes to your last change for this task:\n\n"
-            f"{critique}\n\n"
-            f"Fix them and nothing else."
+            f"{REVIEW_CORRECTIVE_INSTRUCTIONS}\n\n"
+            f"{critique}"
         )
         corrective_result = driver.run(
             corrective_prompt,
@@ -842,14 +867,9 @@ def run_loop(task: str) -> int:
             task_context = [agents_abs] + task_concepts
 
             worker_prompt = (
-                f"Implement this specific task from the approved plan in {plan_abs}:\n\n"
-                f"{task_text}\n\n"
-                f"Implement only this task — do not work ahead to other tasks.\n"
-                f"Follow all conventions in {agents_abs}.\n"
-                f"After completing, append a one-line summary of what you did to {status_abs} "
-                f"under today's date ({datetime.now(tz=UTC).date().isoformat()}).\n"
-                f"End your response with a line starting with 'SUMMARY: ' followed by one "
-                f"sentence on what changed and why."
+                f"{WORKER_STATIC_INSTRUCTIONS}\n\n"
+                f"Task to implement from {plan_abs} (today: {datetime.now(tz=UTC).date().isoformat()}):\n"
+                f"{task_text}"
             )
             worker_result = driver.run(
                 worker_prompt,

@@ -717,3 +717,10 @@ worktree-isolation root cause is also still open if it's worth another look.
 - Forwarded lean `task_context` into `_run_sensors_with_retry`, `_run_code_health_with_retry`, and `_run_review_with_retry`, updating fallback context defaults to `[agents_abs]`. All 215 pytest cases passing cleanly.
 - Added automated tag-matching fallback to `_parse_task_concepts()` in `runner/loop.py`: if `plan.md` omits the `Concepts:` line for a task, it scans `memory/concepts/*.md` YAML frontmatter tags against task text words and auto-attaches matching concept bundles. Explicit `Concepts:` lines override tag matching. Added 2 unit tests in `runner/test_loop.py` (217 total passing).
 
+## 2026-08-11 — Prompt Caching Optimization
+
+### Done
+- Defined static instruction constants (`WORKER_STATIC_INSTRUCTIONS`, `SENSOR_CORRECTIVE_INSTRUCTIONS`, `CODE_HEALTH_CORRECTIVE_INSTRUCTIONS`, `REVIEW_CORRECTIVE_INSTRUCTIONS`, `REVIEWER_STATIC_INSTRUCTIONS`) at the top of `runner/loop.py`.
+- Restructured `worker_prompt`, `review_prompt`, and all corrective retry prompts so that static instruction prefixes appear first, followed by dynamic task/diff data at the end.
+- Combined with `AGENTS.md` being position-first in `context_files`, this maximizes Anthropic prompt caching hits (yielding up to 90% prefill token savings across sequential task calls and retries). All 217 tests passing.
+

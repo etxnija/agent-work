@@ -715,4 +715,5 @@ worktree-isolation root cause is also still open if it's worth another look.
 - Implemented `_parse_task_concepts()` in `runner/loop.py` to extract specified concept file paths from `plan.md` tasks and resolve them to absolute paths under `memory/concepts/`. Added `TestParseTaskConcepts` unit tests in `runner/test_loop.py`.
 - Replaced heavyweight context injection (`[plan_abs, agents_abs, status_abs]` — 100KB+ status.md history) with lean per-task context (`[agents_abs] + task_concepts`), dropping input token context per worker call from ~30k to ~800–1,400 tokens.
 - Forwarded lean `task_context` into `_run_sensors_with_retry`, `_run_code_health_with_retry`, and `_run_review_with_retry`, updating fallback context defaults to `[agents_abs]`. All 215 pytest cases passing cleanly.
+- Added automated tag-matching fallback to `_parse_task_concepts()` in `runner/loop.py`: if `plan.md` omits the `Concepts:` line for a task, it scans `memory/concepts/*.md` YAML frontmatter tags against task text words and auto-attaches matching concept bundles. Explicit `Concepts:` lines override tag matching. Added 2 unit tests in `runner/test_loop.py` (217 total passing).
 

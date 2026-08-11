@@ -286,6 +286,37 @@ class TestParseTaskConcepts:
         assert str(concepts / "c1.md") in parsed
         assert str(concepts / "c2.md") in parsed
 
+    def test_tag_matching_fallback_when_concepts_line_omitted(self, tmp_path):
+        concepts = tmp_path / "memory" / "concepts"
+        concepts.mkdir(parents=True)
+        (concepts / "sandboxing.md").write_text("---\ntags: [sandboxing, worktree]\n---\ncontent")
+        (concepts / "metrics.md").write_text("---\ntags: [telemetry, cost]\n---\ncontent")
+
+        task_text = (
+            "1. **Fix worktree leak** — update sandbox code\n"
+            "   Files: runner/loop.py\n"
+            "   What: fix worktree path comparison"
+        )
+        parsed = _parse_task_concepts(task_text, tmp_path)
+        assert len(parsed) == 1
+        assert parsed[0] == str(concepts / "sandboxing.md")
+
+    def test_explicit_concepts_line_disables_fallback(self, tmp_path):
+        concepts = tmp_path / "memory" / "concepts"
+        concepts.mkdir(parents=True)
+        (concepts / "sandboxing.md").write_text("---\ntags: [sandboxing, worktree]\n---\ncontent")
+        (concepts / "metrics.md").write_text("---\ntags: [telemetry, cost]\n---\ncontent")
+
+        task_text = (
+            "1. **Fix worktree leak** — update sandbox code\n"
+            "   Files: runner/loop.py\n"
+            "   Concepts: metrics.md\n"
+            "   What: update metrics"
+        )
+        parsed = _parse_task_concepts(task_text, tmp_path)
+        assert len(parsed) == 1
+        assert parsed[0] == str(concepts / "metrics.md")
+
 
 # ── _run_sensors ──────────────────────────────────────────────────────────────
 

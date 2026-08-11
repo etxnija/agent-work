@@ -111,26 +111,54 @@ def _parse_task_concepts(task_text: str, project_root: Path) -> list[str]:
     """
     Extract specified concept file paths from a task's 'Concepts:' line in plan.md.
 
-    Returns absolute path strings for existing concept files under memory/concepts/.
-    """
-    match = re.search(r'^\s*Concepts:\s*(.+)$', task_text, re.MULTILINE | re.IGNORECASE)
-    if not match:
-        return []
+    If an explicit 'Concepts:' line is present in task_text, returns absolute paths
+    for existing concept files specified on that line.
 
+    If the 'Concepts:' line is omitted, falls back to automated tag-matching:
+    scans concept files under memory/concepts/ (excluding index.md) and returns
+    concept files whose YAML frontmatter tags match words in task_text.
+    """
     concepts_dir = project_root / "memory" / "concepts"
     if not concepts_dir.exists():
         return []
 
+    # 1. Explicit Concepts: line in plan.md
+    match = re.search(r'^\s*Concepts:\s*(.+)$', task_text, re.MULTILINE | re.IGNORECASE)
+    if match:
+        results = []
+        for raw in match.group(1).split(","):
+            name = raw.strip()
+            if not name:
+                continue
+            if not name.endswith(".md"):
+                name = f"{name}.md"
+            candidate = concepts_dir / name
+            if candidate.exists():
+                results.append(str(candidate))
+        return results
+
+    # 2. Fallback: Automated tag-matching when Concepts: line is omitted
     results = []
-    for raw in match.group(1).split(","):
-        name = raw.strip()
-        if not name:
+    for concept_file in sorted(concepts_dir.glob("*.md")):
+        if concept_file.name == "index.md":
             continue
-        if not name.endswith(".md"):
-            name = f"{name}.md"
-        candidate = concepts_dir / name
-        if candidate.exists():
-            results.append(str(candidate))
+        try:
+            content = concept_file.read_text()
+        except OSError:
+            continue
+
+        tags_match = re.search(r'^\s*tags:\s*\[(.*?)\]', content, re.MULTILINE | re.IGNORECASE)
+        if tags_match:
+            tags = [t.strip().lower() for t in tags_match.group(1).split(",") if t.strip()]
+        else:
+            tags = [concept_file.stem.lower()]
+
+        for tag in tags:
+            pattern = r'\b' + re.escape(tag) + r'\b'
+            if re.search(pattern, task_text, re.IGNORECASE):
+                results.append(str(concept_file))
+                break
+
     return results
 
 

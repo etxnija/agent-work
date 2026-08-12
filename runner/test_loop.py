@@ -750,6 +750,73 @@ class TestRunLoopPerTask:
         assert code == 1
         assert driver.run.call_count == 1  # stopped after first failure
 
+    def test_worker_hard_failure_preserves_branch(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run.return_value = _fail("task 1 broke")
+
+        gate = MagicMock()
+        gate.request.return_value = True
+        fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
+             patch("builtins.print") as mock_print:
+            code = run_loop("task")
+
+        assert code == 1
+        assert fake_sandbox.handle is not None
+        assert fake_sandbox.handle._keep is True
+        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
+        assert any(
+            "agent/fake-branch" in line and "0 completed task(s)" in line for line in printed
+        )
+
+    def test_second_task_worker_failure_preserves_first_tasks_commit(
+        self, tmp_path, monkeypatch
+    ):
+        """Two-task plan: task 1 completes, task 2's worker call fails —
+        the branch is preserved and the recovery message names 1 completed task."""
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = _plan_then_approve
+
+        call_count = 0
+
+        def worker_side_effect(prompt, context_files, cwd=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                status = tmp_path / "memory" / "status.md"
+                status.write_text(status.read_text() + "- task 1 done\n")
+                return _ok()
+            return _fail("task 2 broke")
+
+        driver.run.side_effect = worker_side_effect
+        gate = MagicMock()
+        gate.request.return_value = True
+        fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
+             patch("runner.loop._commit_task") as mock_commit, \
+             patch("builtins.print") as mock_print:
+            code = run_loop("task")
+
+        assert code == 1
+        assert fake_sandbox.handle is not None
+        assert fake_sandbox.handle._keep is True
+        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
+        assert any(
+            "agent/fake-branch" in line and "1 completed task(s)" in line for line in printed
+        )
+        mock_commit.assert_called_once()
+
     def test_stops_on_second_task_failure(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
 

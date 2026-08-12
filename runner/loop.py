@@ -1020,9 +1020,9 @@ def _run_one_task(
     Implement and validate one task: worker call, sensors, code-health,
     review, commit, and per-task metrics reporting.
 
-    Returns an exit code (1) if the loop must stop — a worker failure (branch
-    discarded, handle.keep() not called) or unresolved sensor failures
-    (branch preserved via _handle_sensor_failure) — or (narrative,
+    Returns an exit code (1) if the loop must stop — a worker failure or
+    unresolved sensor failures (branch preserved in both cases, via
+    handle.keep() and _handle_sensor_failure respectively) — or (narrative,
     code_health_findings) on success.
     """
     task_concepts = _parse_task_concepts(task_text, project_root)
@@ -1047,7 +1047,15 @@ def _run_one_task(
         print(f"[error] Worker failed on task {i}/{total}:\n{worker_result.text}")
         print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{total}.")
         sys.stdout.flush()
-        return 1  # handle._keep is False → sandbox discards the branch
+        handle.keep()
+        if handle.branch:
+            print(
+                f"[loop] Branch '{handle.branch}' preserved — {i - 1} completed "
+                f"task(s) are not lost. Inspect with `git log {handle.branch} --oneline`, "
+                f"or merge manually with `git merge --squash {handle.branch} && git commit`."
+            )
+            sys.stdout.flush()
+        return 1
 
     worker_summary = _worker_summary(worker_result.text)
     cost_str = f" (${worker_result.cost_usd:.4f})" if worker_result.cost_usd is not None else ""

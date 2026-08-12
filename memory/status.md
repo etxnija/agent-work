@@ -747,6 +747,12 @@ worktree-isolation root cause is also still open if it's worth another look.
 - Added `.agent-last-run.json` to `.gitignore`.
 - Added `TestWriteLastRunState` (`test_writes_correct_json_content`, `test_overwrites_previous_file`) to `runner/test_loop.py` near `TestCommitTask`, using the module-level `_init_repo` helper. Full suite (115 tests in this file) and `ruff check .` both pass.
 
+## 2026-08-12 — Robustness-fixes plan task 3: wire durable state file into all branch-preservation paths
+
+### Done
+- Wired `_write_last_run_state` into all three branch-preservation paths in `runner/loop.py`: `_handle_sensor_failure` (now takes `project_root: Path` after `handle`), the worker-failure block in `_run_one_task`, and the success path in `_implement_tasks` (after `handle.keep()`, guarded by `if handle.branch:`).
+- Extended `test_worker_hard_failure_preserves_branch` and `test_sensors_fail_every_retry_fails_closed_without_commit` to assert `.agent-last-run.json` exists with the right branch. Added `test_successful_run_writes_last_run_state` to `TestRunLoopPerTask`, mocking `_offer_merge` to return `"merged"`. Full suite (116 tests) and `sensors/lint.sh` both pass.
+
 
 
 

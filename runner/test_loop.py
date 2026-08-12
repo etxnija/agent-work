@@ -775,6 +775,9 @@ class TestRunLoopPerTask:
         assert any(
             "agent/fake-branch" in line and "0 completed task(s)" in line for line in printed
         )
+        state_file = tmp_path / ".agent-last-run.json"
+        assert state_file.exists()
+        assert json.loads(state_file.read_text())["branch"] == "agent/fake-branch"
 
     def test_second_task_worker_failure_preserves_first_tasks_commit(
         self, tmp_path, monkeypatch
@@ -847,6 +850,39 @@ class TestRunLoopPerTask:
 
         assert code == 1
         assert driver.run.call_count == 2
+
+    def test_successful_run_writes_last_run_state(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(SINGLE_TASK_PLAN)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = _plan_then_approve
+
+        def worker_side_effect(prompt, context_files, cwd=None):
+            status = tmp_path / "memory" / "status.md"
+            status.write_text(status.read_text() + "- done\n")
+            return _ok()
+
+        driver.run.side_effect = worker_side_effect
+        gate = MagicMock()
+        gate.request.return_value = True
+        fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
+             patch("runner.loop._commit_task"), \
+             patch("runner.loop._offer_merge", return_value="merged"), \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert code == 0
+        assert fake_sandbox.handle is not None
+        assert fake_sandbox.handle._keep is True
+        state_file = tmp_path / ".agent-last-run.json"
+        assert state_file.exists()
+        assert json.loads(state_file.read_text())["branch"] == "agent/fake-branch"
 
 
 # ── Sensor retry wiring ──────────────────────────────────────────────────────
@@ -939,6 +975,9 @@ class TestRunLoopSensorRetry:
         assert any(
             "agent/fake-branch" in line and "0 completed task(s)" in line for line in printed
         )
+        state_file = tmp_path / ".agent-last-run.json"
+        assert state_file.exists()
+        assert json.loads(state_file.read_text())["branch"] == "agent/fake-branch"
 
     def test_second_task_sensor_exhaustion_preserves_first_tasks_commit(
         self, tmp_path, monkeypatch

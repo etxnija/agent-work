@@ -913,7 +913,7 @@ def _generate_plan(driver: AgentDriver, task: str) -> int:
     return 0
 
 
-def _handle_sensor_failure(failures: list[tuple[str, str]], i: int, total: int, handle) -> int:
+def _handle_sensor_failure(failures: list[tuple[str, str]], i: int, total: int, handle, project_root: Path) -> int:
     """Print the sensor-failure stop message, preserve the branch, and return exit code 1."""
     print(
         f"[error] Sensors still failing on task {i}/{total}: "
@@ -923,6 +923,7 @@ def _handle_sensor_failure(failures: list[tuple[str, str]], i: int, total: int, 
     sys.stdout.flush()
     handle.keep()
     if handle.branch:
+        _write_last_run_state(project_root, handle.branch, handle.path)
         print(
             f"[loop] Branch '{handle.branch}' preserved — {i - 1} completed "
             f"task(s) are not lost. Inspect with `git log {handle.branch} --oneline`, "
@@ -1069,6 +1070,7 @@ def _run_one_task(
         sys.stdout.flush()
         handle.keep()
         if handle.branch:
+            _write_last_run_state(project_root, handle.branch, handle.path)
             print(
                 f"[loop] Branch '{handle.branch}' preserved — {i - 1} completed "
                 f"task(s) are not lost. Inspect with `git log {handle.branch} --oneline`, "
@@ -1090,7 +1092,7 @@ def _run_one_task(
         driver, handle, i, total, task_text, plan_abs, agents_abs, status_abs, task_context, review_critiques
     )
     if narrative_partial is None:
-        return _handle_sensor_failure(failures, i, total, handle)
+        return _handle_sensor_failure(failures, i, total, handle, project_root)
 
     narrative = {"num": i, "title": _task_title(task_text), "summary": worker_summary, **narrative_partial}
 
@@ -1175,6 +1177,8 @@ def _implement_tasks(
             task_narratives.append(narrative)
 
         handle.keep()  # all tasks complete → preserve the branch for merge
+        if handle.branch:
+            _write_last_run_state(project_root, handle.branch, handle.path)
 
     return None, handle, task_narratives, review_critiques, code_health_issues
 

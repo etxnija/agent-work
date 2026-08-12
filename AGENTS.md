@@ -19,8 +19,27 @@ runner/sandbox/   SandboxRuntime ABC + concrete backends (swap via AGENT_SANDBOX
 agents/           Sub-agent definitions (markdown, mostly tool-agnostic)
 sensors/          Shell scripts: lint, test, LSP checks (no model dependency)
 bootstrap/        Sets up a new project with harness structure
-memory/           AGENTS.md (this file) + status.md (work log)
+memory/           status.md (work log) + concepts/*.md (durable, tagged concept bundles)
 ```
+
+AGENTS.md (this file, repo root) and `docs/arch/adr/*.md` (decision records) are part of
+the same memory system — see Memory model below.
+
+## Memory model
+
+- Everything under `memory/` (`status.md`, `memory/concepts/*.md`), `AGENTS.md` itself, and
+  `docs/arch/adr/*.md` is **project memory, not personal notes** — git-tracked, reviewed
+  like code, meant for any future contributor or agent working this repo, not just whoever
+  wrote it.
+- `memory/concepts/*.md` and `docs/arch/adr/*.md` are the durable layer: topic-scoped,
+  YAML-tagged (concepts), immutable-once-accepted (ADRs). This is what gets fed to agents
+  as bounded context — keep it current, not `status.md`.
+- `memory/status.md` is the raw chronological log — append-only, currently unattributed
+  (no author/session field). Treat entries as project history, not a personal journal, even
+  though nothing yet records who or which run wrote them.
+- Plain markdown in git was a deliberate choice: portable across AI tools/drivers (no
+  vendor lock-in to any one tool's native memory) and shareable across contributors with
+  the same git workflow as code — one structure serving both goals.
 
 ## Design rules
 

@@ -2,7 +2,7 @@
 type: decision
 tags: [sandboxing, worktree, security, permissions]
 summary: Git worktree isolation and .claude permission rules for worker tasks.
-links: [docs/arch/adr/0007-worker-sandboxing.md, docs/arch/adr/0009-worktree-sandboxing.md]
+links: [docs/arch/adr/0007-sandboxing-deferred-to-phase-4.md, docs/arch/adr/0009-sandboxing-phase-1-1-worktree-and-tool-grants.md]
 updated: 2026-08-11
 ---
 

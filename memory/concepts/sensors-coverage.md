@@ -2,7 +2,7 @@
 type: component
 tags: [sensors, coverage, lint, pyright, code-health]
 summary: Computational sensors, linting, LSP type-checking, diff-coverage, and code-health checks.
-links: [docs/arch/adr/0010-sensor-retry-mechanism.md]
+links: [docs/arch/adr/0010-sensor-feedback-retry.md]
 updated: 2026-08-11
 ---
 

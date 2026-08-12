@@ -797,3 +797,6 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 ### Done
 - Added `TestPerformSquashMergeVerification` to `runner/test_loop.py`, calling `_perform_squash_merge()` directly (not through `_offer_merge()`) against a real git repo in `tmp_path`. `test_committed_concept_file_gets_verified_stamp` builds a branch adding `memory/concepts/test-concept.md`, merges it into main, and asserts via `git show HEAD:...` that the *committed* content has `verified: [{ by: "human", at: <today's real ISO date> }]` and the working tree is clean. `test_branch_with_only_non_concept_files_skips_stamping` builds a branch touching only `a.txt`, patches `_stamp_verified` to assert it's never called, and confirms the commit still succeeds. 131 tests passing, `sensors/lint.sh` clean.
+
+
+**Run metrics:** 33 driver call(s), $10.0436, session 484baf3d-b1a6-4cea-8dd5-583a26f8cf68

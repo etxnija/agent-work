@@ -815,3 +815,38 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 ### Done
 - Added `test_sensor_failure_after_leak_still_prints_warning` to `TestRunLoopMainCheckoutLeak` (`runner/test_loop.py`), covering the third exit path of the `finally:`-block fix: `_main_checkout_dirty_paths` mocked with `side_effect=[[], ["leaked.py"]]`, `driver.run.side_effect = self._worker_ok(tmp_path)` (worker succeeds), `_run_sensors` patched to `return_value=[("lint.sh", "still bad")]` so it fails on every attempt through `SENSOR_RETRY_LIMIT`, `_FakeBranchSandbox` for a truthy branch — asserts `code == 1`, `"wrote outside its sandboxed worktree" in out`, and `"leaked.py" in out`. 241 tests passing repo-wide, `ruff`/`pyright` clean.
+
+## 2026-08-12 — Task 2: Auto-commit plan-rejected status entry
+
+### Done
+- In `run_loop()`'s plan-rejected path (`runner/loop.py`), added a call to `_commit_status_update("Record plan-rejected status", project_root)` immediately after the `_append_status(...)` call and before `return 2`, so the rejection entry is committed to `memory/status.md` the same way task commits are. Added `test_gate_rejection_commits_status_update` to `TestRunLoopGateRejection` (`runner/test_loop.py`), mocking `runner.loop._commit_status_update` and asserting it's called once with the rejection message and `project_root`. 136 tests passing.
+
+## 2026-08-12 — Task 3: Auto-commit run-metrics status entry
+
+### Done
+- In `_finalize_run()` (`runner/loop.py`), added a call to `_commit_status_update("Record run metrics", project_root)` immediately after the `_append_status(...)` call that writes the run-metrics summary, so it's committed to `memory/status.md` the same way the plan-rejected entry now is (Task 2). `project_root` was already a parameter of `_finalize_run()`, no signature change needed. 136 tests passing.
+
+## 2026-08-12 — Task 4: Strengthen `TestCommitStatusUpdate` in a real git repo
+
+### Done
+- Expanded `TestCommitStatusUpdate.test_commits_status_file` (`runner/test_loop.py`) to also assert, after calling `_commit_status_update("test message", tmp_path)` against a real `_init_repo(tmp_path)` git repo: `git status --porcelain` no longer reports `memory/status.md` as dirty, and `git show HEAD --name-only --format=` lists exactly `["memory/status.md"]` — confirming `_commit_status_update` doesn't sweep in other files. Added `test_nothing_changed_does_not_crash`, which commits an already-tracked, unmodified `memory/status.md` and then calls `_commit_status_update` again, asserting the "nothing to commit" git failure is handled gracefully (prints `[status] Commit failed`, no new log entry, no exception) — this superseded and replaced the narrower `test_commit_failure_prints_warning` it made redundant. 136 tests passing, `sensors/lint.sh` clean.
+
+## 2026-08-12 — Task 5: Test plan-rejected path leaves no dirty `memory/status.md`
+
+### Done
+- Added `test_gate_rejection_leaves_no_dirty_status_md` to `TestRunLoopGateRejection` (`runner/test_loop.py`): real git repo via `_init_repo(tmp_path)` then `_make_project(tmp_path)` (init before files exist), `git add -A && git commit` to start clean, then a full `run_loop("task")` with a rejecting gate. Asserts `code == 2` and `git status --porcelain -- memory/status.md` is empty — end-to-end coverage of the plan-rejected → `_append_status` → `_commit_status_update` chain, not just the mocked call-was-made assertion the prior test in this class already covers. 137 tests passing, `ruff`/`pyright` clean.
+
+## 2026-08-12 — Task 6: Test run-metrics path leaves no dirty `memory/status.md`
+
+### Done
+- Added `test_run_metrics_leave_no_dirty_status_md` to `TestRunLoopMetricsSummary` (`runner/test_loop.py`), mirroring the prior task's real-git-repo pattern (`_init_repo` + `_make_project` + `git add -A && git commit`) but driving the full two-task success path (mock driver, gate approves, `NoopSandbox`, worker appends to status.md, `_run_sensors` clean, reviewer approves, `_commit_task` mocked out to avoid committing task-branch content since `NoopSandbox` has no branch). After `run_loop("task")` returns 0, asserts `git status --porcelain -- memory/status.md` is empty — end-to-end coverage of the `_finalize_run` → `_append_status` → `_commit_status_update` chain. 138 tests passing, `sensors/lint.sh` clean.
+
+## 2026-08-12 — Task 7: Fix AGENTS.md Gotchas — correct inaccurate status.md claim
+
+### Done
+- Corrected the worktree gotcha in `AGENTS.md` (line 95): removed the inaccurate "Status.md writes go to the project root, not the worktree" claim and replaced it with an accurate description — per-task status.md entries are written into the worktree and travel with that task's commit, while the harness's own run-level summary (metrics, plan-rejected) is written directly to the main checkout and auto-committed immediately.
+
+## 2026-08-12 — Task 8: Fix `_main_checkout_dirty_paths` docstring — correct inaccurate exclusion rationale
+
+### Done
+- Corrected the docstring of `_main_checkout_dirty_paths` in `runner/loop.py` (lines 199-207): replaced the inaccurate "the one file workers intentionally write there directly via absolute path, by design (see AGENTS.md)" with an accurate rationale — the exclusion tolerates an occasional main-checkout status.md write from the harness's own `_append_status` calls or inconsistent worker behavior, without flagging it as a sandboxing leak. Removed the stale "(see AGENTS.md)" pointer.

@@ -199,8 +199,9 @@ def _parse_task_concepts(task_text: str, project_root: Path) -> list[str]:
 def _main_checkout_dirty_paths(project_root: Path, status_abs: str) -> list[str]:
     """
     Return paths (relative to project_root) with uncommitted changes in the main
-    checkout, excluding status_abs — the one file workers intentionally write
-    there directly via absolute path, by design (see AGENTS.md).
+    checkout, excluding status_abs — tolerates an occasional main-checkout
+    status.md write (from the harness's own _append_status calls, or from
+    inconsistent worker behavior) without flagging it as a sandboxing leak.
 
     A worker runs with cwd set to its sandboxed worktree; anything else showing
     up dirty here means it wrote outside that sandbox.
@@ -634,6 +635,28 @@ def _commit_task(task_num: int, title: str, worktree: Path) -> None:
         print(f"[commit] Task {task_num}: nothing new to commit in worktree.")
     else:
         print(f"[commit] Warning: commit failed — {commit.stderr.strip()}")
+
+
+def _commit_status_update(message: str, project_root: Path) -> None:
+    """Commit only memory/status.md in project_root. Scoped strictly to that file."""
+    subprocess.run(
+        ["git", "add", "memory/status.md"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    commit = subprocess.run(
+        ["git", "commit", "-m", message],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if commit.returncode != 0:
+        print(f"[status] Commit failed: {commit.stderr.strip()}")
+        return
 
 
 def _write_last_run_state(project_root: Path, branch: str, worktree: Path) -> None:
@@ -1215,6 +1238,7 @@ def _finalize_run(
         f"\n**Run metrics:** {run_metrics.calls} driver call(s), "
         f"${run_metrics.cost_usd:.4f}, session {run_metrics.last_session_id}\n"
     )
+    _commit_status_update("Record run metrics", project_root)
 
 
 def _implement_tasks(
@@ -1291,6 +1315,7 @@ def run_loop(task: str) -> int:
             f"Task: {task}\n"
             f"Plan written but not approved by human.\n"
         )
+        _commit_status_update("Record plan-rejected status", project_root)
         return 2
 
     tasks = _parse_tasks(PLAN_FILE)

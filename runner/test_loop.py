@@ -26,6 +26,7 @@ from runner.loop import (
     _append_narrative_outcome,
     _branch_commits,
     _build_narrative,
+    _commit_status_update,
     _commit_task,
     _main_checkout_dirty_paths,
     _offer_merge,
@@ -666,6 +667,57 @@ class TestRunLoopGateRejection:
 
         assert code == 2
         driver.run.assert_not_called()
+
+    def test_gate_rejection_commits_status_update(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        gate = MagicMock()
+        gate.request.return_value = False
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._commit_status_update") as commit_status_update, \
+             patch("builtins.print"):
+            run_loop("task")
+
+        commit_status_update.assert_called_once_with(
+            "Record plan-rejected status", tmp_path.resolve()
+        )
+
+    def test_gate_rejection_leaves_no_dirty_status_md(self, tmp_path, monkeypatch):
+        _init_repo(tmp_path)
+        _make_project(tmp_path)
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        subprocess.run(["git", "commit", "-m", "scaffold project"], cwd=tmp_path,
+                       check=True, capture_output=True, env=env)
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        gate = MagicMock()
+        gate.request.return_value = False
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert code == 2
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--", "memory/status.md"],
+            cwd=tmp_path, capture_output=True, text=True, check=False,
+        ).stdout
+        assert status == ""
 
 
 # ── Per-task execution ────────────────────────────────────────────────────────
@@ -1485,6 +1537,49 @@ class TestRunLoopMetricsSummary:
         status_text = (tmp_path / "memory" / "status.md").read_text()
         assert "**Run metrics:** 6 driver call(s), $0.0000, session sess-review" in status_text
 
+    def test_run_metrics_leave_no_dirty_status_md(self, tmp_path, monkeypatch):
+        _init_repo(tmp_path)
+        _make_project(tmp_path)
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True, capture_output=True)
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        subprocess.run(["git", "commit", "-m", "scaffold project"], cwd=tmp_path,
+                       check=True, capture_output=True, env=env)
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
+
+        def worker_side_effect(prompt, context_files, cwd=None):
+            status = tmp_path / "memory" / "status.md"
+            status.write_text(status.read_text() + "- done\n")
+            return _ok()
+
+        def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
+            if agent_name == REVIEWER_AGENT:
+                return _ok(REVIEW_APPROVED_SIGNAL, session_id="sess-review")
+            return _ok(PLAN_READY_SIGNAL)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = run_subagent_side_effect
+        driver.run.side_effect = worker_side_effect
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", return_value=[]), \
+             patch("runner.loop._commit_task"), \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert code == 0
+        status = subprocess.run(
+            ["git", "status", "--porcelain", "--", "memory/status.md"],
+            cwd=tmp_path, capture_output=True, text=True, check=False,
+        ).stdout
+        assert status == ""
+
 
 # ── Main-checkout leak detection ─────────────────────────────────────────────
 
@@ -1794,6 +1889,57 @@ class TestCommitTask:
         log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
                              capture_output=True, text=True, check=False).stdout
         assert log.strip().count("\n") == 0  # single commit
+
+
+class TestCommitStatusUpdate:
+    def _init_repo(self, path: Path) -> None:
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "init"],
+                       cwd=path, check=True, capture_output=True, env=env)
+
+    def test_commits_status_file(self, tmp_path):
+        self._init_repo(tmp_path)
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "status.md").write_text("update")
+        _commit_status_update("test message", tmp_path)
+
+        log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
+                             capture_output=True, text=True, check=False).stdout
+        assert "test message" in log
+
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=tmp_path,
+                                capture_output=True, text=True, check=False).stdout
+        assert "memory/status.md" not in status
+
+        files = subprocess.run(
+            ["git", "show", "HEAD", "--name-only", "--format="], cwd=tmp_path,
+            capture_output=True, text=True, check=False,
+        ).stdout
+        assert [line for line in files.splitlines() if line] == ["memory/status.md"]
+
+    def test_nothing_changed_does_not_crash(self, tmp_path, capsys):
+        self._init_repo(tmp_path)
+        memory_dir = tmp_path / "memory"
+        memory_dir.mkdir()
+        (memory_dir / "status.md").write_text("unchanged")
+        subprocess.run(["git", "add", "memory/status.md"], cwd=tmp_path,
+                       capture_output=True, check=True)
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        subprocess.run(["git", "commit", "-m", "add status"], cwd=tmp_path,
+                       capture_output=True, check=True, env=env)
+
+        # status.md is already committed and unchanged, so there is nothing to commit.
+        _commit_status_update("test message", tmp_path)
+
+        out = capsys.readouterr().out
+        assert "[status] Commit failed" in out
+        log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
+                             capture_output=True, text=True, check=False).stdout
+        assert "test message" not in log
 
 
 class TestWriteLastRunState:

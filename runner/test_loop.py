@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,6 +22,7 @@ from runner.loop import (
     REVIEW_RETRY_LIMIT,
     REVIEWER_AGENT,
     SENSOR_RETRY_LIMIT,
+    WORKER_STATIC_INSTRUCTIONS,
     _append_narrative_outcome,
     _branch_commits,
     _build_narrative,
@@ -29,6 +31,7 @@ from runner.loop import (
     _offer_merge,
     _parse_task_concepts,
     _parse_tasks,
+    _perform_squash_merge,
     _plan_invalid_reason,
     _review_verdict,
     _run_code_health_with_retry,
@@ -36,6 +39,7 @@ from runner.loop import (
     _run_sensors,
     _run_sensors_with_retry,
     _show_diff_in_editor,
+    _stamp_verified,
     _task_diff,
     _task_title,
     _update_coverage_baseline,
@@ -569,6 +573,24 @@ class TestRunReviewWithRetry:
         assert failures != []
         assert failures[0][0] == "lint.sh"
         assert 1 not in review_critiques
+
+    def test_corrective_call_failure_breaks_retry_loop(self, tmp_path):
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(f"{REVIEW_CHANGES_SIGNAL}\nFix the thing.")
+        driver.run.return_value = _fail()
+        review_critiques: dict[int, str] = {}
+
+        approved, critique, review_attempt, sensor_retry_count, failures = (
+            _run_review_with_retry(*self._args(tmp_path, driver, review_critiques))
+        )
+
+        assert approved is False
+        assert critique == "Fix the thing."
+        assert review_attempt == 1
+        assert sensor_retry_count == 0
+        assert failures == []
+        assert driver.run.call_count == 1
+        assert review_critiques[1] == "Fix the thing."
 
 
 # ── Planner failures ──────────────────────────────────────────────────────────
@@ -1868,6 +1890,24 @@ class TestWorkerSummary:
         assert _worker_summary(text) == "Fixed the bug."
 
 
+class TestWorkerStaticInstructions:
+    def test_mentions_durable_memory_locations(self):
+        assert "memory/concepts/" in WORKER_STATIC_INSTRUCTIONS
+        assert "AGENTS.md" in WORKER_STATIC_INSTRUCTIONS
+
+    def test_mentions_generated_metadata_guidance(self):
+        assert "generated:" in WORKER_STATIC_INSTRUCTIONS
+
+    def test_summary_rule_is_numbered_five(self):
+        assert "5. End your response with a line starting with 'SUMMARY: '" in (
+            WORKER_STATIC_INSTRUCTIONS
+        )
+
+    def test_rule_count_is_five(self):
+        rule_lines = re.findall(r"^\d+\.", WORKER_STATIC_INSTRUCTIONS, re.MULTILINE)
+        assert len(rule_lines) == 5
+
+
 # ── _build_narrative ─────────────────────────────────────────────────────────
 
 class TestBuildNarrative:
@@ -2144,6 +2184,37 @@ class TestOfferMerge:
         assert len(log) == 2  # init + one squash commit
         assert "add a and b" in log[0]  # subject is the task description
 
+    def test_merge_y_stamps_verified_into_staged_concept_files(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.delenv("ZELLIJ", raising=False)
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        _init_repo(tmp_path)
+        concepts_dir = tmp_path / "memory" / "concepts"
+        concepts_dir.mkdir(parents=True)
+
+        subprocess.run(["git", "checkout", "-b", "agent/feat"],
+                       cwd=tmp_path, check=True, capture_output=True)
+        (concepts_dir / "widgets.md").write_text(
+            "---\ntype: pattern\ntags: [widgets]\n---\n\n# Widgets\n"
+        )
+        (concepts_dir / "index.md").write_text("---\ntype: index\n---\n\n# Index\n")
+        subprocess.run(["git", "add", "memory"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Task 1: add widgets concept"],
+                       cwd=tmp_path, check=True, capture_output=True, env=env)
+        subprocess.run(["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True)
+
+        with patch("builtins.input", return_value="y"):
+            outcome = _offer_merge("agent/feat", tmp_path, task="add widgets concept")
+
+        assert outcome == "merged"
+        assert "verified:" in (concepts_dir / "widgets.md").read_text()
+        assert "verified:" not in (concepts_dir / "index.md").read_text()
+
+        # the stamp is part of the squash commit, not left as an unstaged change
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=tmp_path,
+                                capture_output=True, text=True, check=False).stdout
+        assert status.strip() == ""
+
     def test_merge_n_preserves_branch_and_prints_instructions(self, tmp_path, capsys, monkeypatch):
         monkeypatch.delenv("ZELLIJ", raising=False)
         _init_repo(tmp_path)
@@ -2315,6 +2386,66 @@ class TestOfferMerge:
         mock_baseline.assert_not_called()
 
 
+class TestPerformSquashMergeVerification:
+    def test_committed_concept_file_gets_verified_stamp(self, tmp_path):
+        import datetime as dt_module
+
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        _init_repo(tmp_path)
+        concepts_dir = tmp_path / "memory" / "concepts"
+        concepts_dir.mkdir(parents=True)
+
+        subprocess.run(["git", "checkout", "-b", "agent/feat"],
+                       cwd=tmp_path, check=True, capture_output=True)
+        (concepts_dir / "test-concept.md").write_text(
+            "---\ntype: pattern\ntags: [test]\nsummary: a test concept\n---\n\n# Test Concept\n"
+        )
+        subprocess.run(["git", "add", "memory"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Task 1: add test concept"],
+                       cwd=tmp_path, check=True, capture_output=True, env=env)
+        subprocess.run(["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True)
+
+        outcome = _perform_squash_merge(
+            "agent/feat", tmp_path, "add test concept", ["Task 1: add test concept"]
+        )
+
+        assert outcome == "merged"
+
+        # committed content (working tree is clean post-commit, so this reflects HEAD)
+        committed = subprocess.run(
+            ["git", "show", "HEAD:memory/concepts/test-concept.md"],
+            cwd=tmp_path, capture_output=True, text=True, check=True,
+        ).stdout
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=tmp_path,
+                                capture_output=True, text=True, check=False).stdout
+        assert status.strip() == ""
+
+        today = dt_module.datetime.now(dt_module.UTC).date().isoformat()
+        assert f'verified: [{{ by: "human", at: {today} }}]' in committed
+
+    def test_branch_with_only_non_concept_files_skips_stamping(self, tmp_path):
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        _init_repo(tmp_path)
+
+        subprocess.run(["git", "checkout", "-b", "agent/feat"],
+                       cwd=tmp_path, check=True, capture_output=True)
+        (tmp_path / "a.txt").write_text("a")
+        subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Task 1: add a"],
+                       cwd=tmp_path, check=True, capture_output=True, env=env)
+        subprocess.run(["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True)
+
+        with patch("runner.loop._stamp_verified") as mock_stamp:
+            outcome = _perform_squash_merge(
+                "agent/feat", tmp_path, "add a", ["Task 1: add a"]
+            )
+
+        mock_stamp.assert_not_called()
+        assert outcome == "merged"
+
+
 class TestShowDiffInEditor:
     def test_noop_when_not_in_zellij(self, tmp_path, monkeypatch):
         monkeypatch.delenv("ZELLIJ", raising=False)
@@ -2385,3 +2516,110 @@ class TestShowDiffInEditor:
         assert "# Outstanding code-health findings" in content
         assert "## Task 1" in content
         assert "NLOC 60 exceeds threshold 50" in content
+
+
+class TestStampVerified:
+    def test_noop_when_no_frontmatter(self, tmp_path):
+        path = tmp_path / "concept.md"
+        path.write_text("# No frontmatter here\n")
+
+        _stamp_verified(path)
+
+        assert path.read_text() == "# No frontmatter here\n"
+
+    def test_noop_when_frontmatter_unterminated(self, tmp_path):
+        path = tmp_path / "concept.md"
+        path.write_text("---\ntype: pattern\nno closing delimiter\n")
+
+        _stamp_verified(path)
+
+        assert path.read_text() == "---\ntype: pattern\nno closing delimiter\n"
+
+    def test_adds_verified_key_when_absent(self, tmp_path, monkeypatch):
+        import datetime as dt_module
+
+        class _FixedDatetime(dt_module.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return dt_module.datetime(2026, 8, 12, tzinfo=tz)
+
+        monkeypatch.setattr("runner.loop.datetime", _FixedDatetime)
+
+        path = tmp_path / "concept.md"
+        path.write_text("---\ntype: pattern\ntags: [foo]\n---\n\n# Body\n")
+
+        _stamp_verified(path)
+
+        content = path.read_text()
+        assert 'verified: [{ by: "human", at: 2026-08-12 }]' in content
+        assert content.endswith("---\n\n# Body\n")
+
+    def test_appends_to_existing_verified_list(self, tmp_path, monkeypatch):
+        import datetime as dt_module
+
+        class _FixedDatetime(dt_module.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return dt_module.datetime(2026, 8, 12, tzinfo=tz)
+
+        monkeypatch.setattr("runner.loop.datetime", _FixedDatetime)
+
+        path = tmp_path / "concept.md"
+        path.write_text(
+            '---\ntype: pattern\nverified: [{ by: "human", at: 2026-01-01 }]\n---\n\n# Body\n'
+        )
+
+        _stamp_verified(path)
+
+        content = path.read_text()
+        assert (
+            'verified: [{ by: "human", at: 2026-01-01 }, { by: "human", at: 2026-08-12 }]'
+            in content
+        )
+
+    def test_replaces_non_list_verified_value(self, tmp_path, monkeypatch):
+        import datetime as dt_module
+
+        class _FixedDatetime(dt_module.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return dt_module.datetime(2026, 8, 12, tzinfo=tz)
+
+        monkeypatch.setattr("runner.loop.datetime", _FixedDatetime)
+
+        path = tmp_path / "concept.md"
+        path.write_text("---\ntype: pattern\nverified: true\n---\n\n# Body\n")
+
+        _stamp_verified(path)
+
+        content = path.read_text()
+        assert 'verified: [{ by: "human", at: 2026-08-12 }]' in content
+
+    def test_verified_entry_has_by_human_and_todays_date(self, tmp_path):
+        import datetime as dt_module
+
+        path = tmp_path / "concept.md"
+        path.write_text("---\ntype: pattern\n---\n\n# Body\n")
+
+        _stamp_verified(path)
+
+        content = path.read_text()
+        today = dt_module.datetime.now(dt_module.UTC).date().isoformat()
+        assert f'verified: [{{ by: "human", at: {today} }}]' in content
+
+
+# ── memory/concepts/index.md consistency ───────────────────────────────────────
+
+class TestConceptIndex:
+    def test_index_lists_every_concept_file(self):
+        repo_root = Path(__file__).resolve().parent.parent
+        concepts_dir = repo_root / "memory" / "concepts"
+        index_text = (concepts_dir / "index.md").read_text()
+
+        concept_files = sorted(
+            p.name for p in concepts_dir.glob("*.md") if p.name != "index.md"
+        )
+        assert concept_files, "expected at least one concept file to check the index against"
+
+        missing = [name for name in concept_files if name not in index_text]
+        assert not missing, f"memory/concepts/index.md is missing links for: {missing}"

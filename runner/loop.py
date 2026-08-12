@@ -49,7 +49,11 @@ WORKER_STATIC_INSTRUCTIONS = (
     "1. Follow all conventions in AGENTS.md.\n"
     "2. Implement only the assigned task — do not work ahead to other tasks.\n"
     "3. After completing, append a one-line summary of what you did to memory/status.md.\n"
-    "4. End your response with a line starting with 'SUMMARY: ' followed by one sentence on what changed and why."
+    "4. Update durable memory (AGENTS.md for conventions, memory/concepts/*.md for "
+    "components/patterns/decisions) when the task represents lasting knowledge. New concept "
+    "files must include `generated: { by: worker, at: <ISO 8601> }` frontmatter and an entry "
+    "in memory/concepts/index.md.\n"
+    "5. End your response with a line starting with 'SUMMARY: ' followed by one sentence on what changed and why."
 )
 
 SENSOR_CORRECTIVE_INSTRUCTIONS = (
@@ -396,6 +400,31 @@ def _apply_review_corrective(
     return True
 
 
+def _retry_review_correction(
+    driver: AgentDriver,
+    critique: str,
+    ctx: list[str],
+    worktree: Path,
+    i: int,
+    total: int,
+    review_critiques: dict[int, str],
+    review_attempt: int,
+) -> bool:
+    """Log the retry and apply the corrective worker call. Returns False if the
+    corrective call failed (critique recorded on review_critiques in that case)."""
+    print(
+        f"[review] Task {i}/{total}: changes requested "
+        f"(attempt {review_attempt}/{REVIEW_RETRY_LIMIT})."
+    )
+    sys.stdout.flush()
+    print(f"[worker:corrective] Task {i}/{total}: Applying reviewer correction...")
+    sys.stdout.flush()
+    if not _apply_review_corrective(driver, critique, ctx, worktree, i, total):
+        review_critiques[i] = critique
+        return False
+    return True
+
+
 def _run_review_with_retry(
     worktree: Path,
     task_text: str,
@@ -445,15 +474,9 @@ def _run_review_with_retry(
             return approved, critique, review_attempt, sensor_retry_count, []
 
         review_attempt += 1
-        print(
-            f"[review] Task {i}/{total}: changes requested "
-            f"(attempt {review_attempt}/{REVIEW_RETRY_LIMIT})."
-        )
-        sys.stdout.flush()
-        print(f"[worker:corrective] Task {i}/{total}: Applying reviewer correction...")
-        sys.stdout.flush()
-        if not _apply_review_corrective(driver, critique, ctx, worktree, i, total):
-            review_critiques[i] = critique
+        if not _retry_review_correction(
+            driver, critique, ctx, worktree, i, total, review_critiques, review_attempt
+        ):
             return approved, critique, review_attempt, sensor_retry_count, []
 
         failures, attempt = _run_sensors_with_retry(
@@ -704,6 +727,43 @@ def _show_diff_in_editor(
     _zellij_edit(path)
 
 
+def _stamp_verified(path: Path) -> None:
+    """
+    Patch a `verified:` entry into a concept file's YAML frontmatter, recording
+    that a human reviewed it at merge time. Appends to the existing `verified`
+    list if present, otherwise creates it. No-op if the file has no frontmatter.
+    Uses string splitting rather than a YAML library, matching
+    `_parse_frontmatter()` in runner/drivers/claude.py.
+    """
+    content = path.read_text()
+    if not content.startswith("---"):
+        return
+    parts = content.split("---", 2)
+    if len(parts) != 3:
+        return
+
+    at = datetime.now(UTC).date().isoformat()
+    entry = f'{{ by: "human", at: {at} }}'
+
+    lines = parts[1].splitlines()
+    for i, line in enumerate(lines):
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "verified":
+            value = value.strip()
+            if value.startswith("[") and value.endswith("]"):
+                existing = value[1:-1].strip()
+                items = f"{existing}, {entry}" if existing else entry
+            else:
+                items = entry
+            lines[i] = f"verified: [{items}]"
+            break
+    else:
+        lines.append(f"verified: [{entry}]")
+
+    frontmatter = "\n".join(lines)
+    path.write_text(f"---{frontmatter}\n---{parts[2]}")
+
+
 def _perform_squash_merge(branch: str, project_root: Path, task: str, commits: list[str]) -> str:
     """Squash branch's commits into one commit on the current branch, deleting branch on success."""
     squash = subprocess.run(
@@ -717,6 +777,19 @@ def _perform_squash_merge(branch: str, project_root: Path, task: str, commits: l
         print(f"[merge] Squash failed: {squash.stderr.strip()}")
         print(f"[merge] Branch '{branch}' preserved.")
         return "squash failed"
+
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    for rel_path in staged.stdout.splitlines():
+        path = Path(rel_path)
+        if path.match("memory/concepts/*.md") and path.name != "index.md":
+            _stamp_verified(project_root / path)
+            subprocess.run(["git", "add", rel_path], cwd=project_root, capture_output=True, check=False)
 
     # Build a single commit message: task as subject, per-task commits as body.
     subject = task.strip() or branch
@@ -913,12 +986,9 @@ def _generate_plan(driver: AgentDriver, task: str) -> int:
     return 0
 
 
-def _handle_sensor_failure(failures: list[tuple[str, str]], i: int, total: int, handle, project_root: Path) -> int:
-    """Print the sensor-failure stop message, preserve the branch, and return exit code 1."""
-    print(
-        f"[error] Sensors still failing on task {i}/{total}: "
-        f"{', '.join(name for name, _ in failures)}."
-    )
+def _stop_and_preserve_branch(header: str, i: int, total: int, handle, project_root: Path) -> int:
+    """Print the given error header and stop message, preserve the branch, and return exit code 1."""
+    print(header)
     print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{total}.")
     sys.stdout.flush()
     handle.keep()
@@ -931,6 +1001,23 @@ def _handle_sensor_failure(failures: list[tuple[str, str]], i: int, total: int, 
         )
         sys.stdout.flush()
     return 1
+
+
+def _handle_sensor_failure(failures: list[tuple[str, str]], i: int, total: int, handle, project_root: Path) -> int:
+    """Print the sensor-failure stop message, preserve the branch, and return exit code 1."""
+    header = (
+        f"[error] Sensors still failing on task {i}/{total}: "
+        f"{', '.join(name for name, _ in failures)}."
+    )
+    return _stop_and_preserve_branch(header, i, total, handle, project_root)
+
+
+def _handle_worker_failure(
+    worker_result, i: int, total: int, handle, project_root: Path
+) -> int:
+    """Print the worker-failure stop message, preserve the branch, and return exit code 1."""
+    header = f"[error] Worker failed on task {i}/{total}:\n{worker_result.text}"
+    return _stop_and_preserve_branch(header, i, total, handle, project_root)
 
 
 def _run_task_checks(
@@ -1043,8 +1130,8 @@ def _run_one_task(
 
     Returns an exit code (1) if the loop must stop — a worker failure or
     unresolved sensor failures (branch preserved in both cases, via
-    handle.keep() and _handle_sensor_failure respectively) — or (narrative,
-    code_health_findings) on success.
+    _handle_worker_failure and _handle_sensor_failure respectively) — or
+    (narrative, code_health_findings) on success.
     """
     task_concepts = _parse_task_concepts(task_text, project_root)
     task_context = [agents_abs] + task_concepts
@@ -1065,19 +1152,7 @@ def _run_one_task(
     worker_result = driver.run(worker_prompt, context_files=task_context, cwd=handle.path)
 
     if worker_result.exit_code != 0:
-        print(f"[error] Worker failed on task {i}/{total}:\n{worker_result.text}")
-        print(f"[loop] Stopped at task {i}. Completed: {i - 1}/{total}.")
-        sys.stdout.flush()
-        handle.keep()
-        if handle.branch:
-            _write_last_run_state(project_root, handle.branch, handle.path)
-            print(
-                f"[loop] Branch '{handle.branch}' preserved — {i - 1} completed "
-                f"task(s) are not lost. Inspect with `git log {handle.branch} --oneline`, "
-                f"or merge manually with `git merge --squash {handle.branch} && git commit`."
-            )
-            sys.stdout.flush()
-        return 1
+        return _handle_worker_failure(worker_result, i, total, handle, project_root)
 
     worker_summary = _worker_summary(worker_result.text)
     cost_str = f" (${worker_result.cost_usd:.4f})" if worker_result.cost_usd is not None else ""

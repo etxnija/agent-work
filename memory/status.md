@@ -756,3 +756,44 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 
 
+- Added rule 4 to `WORKER_STATIC_INSTRUCTIONS` in `runner/loop.py`: workers must update durable memory (AGENTS.md prose for convention changes, memory/concepts/*.md for component/pattern/decision changes, with `generated: { by: worker, at: <ISO 8601> }` frontmatter and an index.md entry) when a task represents durable knowledge. Renumbered the SUMMARY rule from 4 to 5. Full suite (116 tests) passes.
+
+## 2026-08-12 — Task 2: `TestWorkerStaticInstructions` for the durable-memory rule
+
+### Done
+- Added `TestWorkerStaticInstructions` to `runner/test_loop.py` (near `TestWorkerSummary`): asserts `WORKER_STATIC_INSTRUCTIONS` mentions `memory/concepts/` and `AGENTS.md`, contains `generated:`, has the SUMMARY rule renumbered to 5, and has exactly 5 numbered rules (regex on `^\d+\.` lines). Imported `WORKER_STATIC_INSTRUCTIONS` and added `import re` to the test module.
+- Found rule 4 (added by Task 1, commit 54970c8) said "generated metadata" rather than the literal `generated:` field the plan specified (`generated: { by: worker, at: <ISO 8601> }`); updated the rule text in `runner/loop.py` to match the plan's exact phrasing so the new test encodes the actual contract instead of a paraphrase.
+- 120 tests passing, `ruff check .` clean.
+
+## 2026-08-12 — Task 3: `TestConceptIndex` for memory/concepts/index.md consistency
+
+### Done
+- Added `TestConceptIndex` to `runner/test_loop.py`: real-files test (no mocks/tmp_path) that globs `memory/concepts/*.md` excluding `index.md`, reads `memory/concepts/index.md`, and asserts every concept filename appears in the index text — catches drift between the directory and the index. 121 tests passing.
+
+## 2026-08-12 — Reviewer feedback: extract shared branch-preservation logic
+
+### Done
+- Reviewer requested changes on task 3 of the robustness-fixes plan (commit 25f53c4): the `_handle_sensor_failure`/`_handle_worker_failure` extraction duplicated the entire branch-preservation body (only the first `print` header differed). Factored the shared logic into `_stop_and_preserve_branch(header, i, total, handle, project_root)`; both handlers now build their header string and delegate to it. Also extracted `_retry_review_correction()` out of `_run_review_with_retry()` for the same reason and added `test_corrective_call_failure_breaks_retry_loop`. 121 tests still passing, `ruff check .` clean.
+
+## 2026-08-12 — Task 4: `_stamp_verified()` helper
+
+### Done
+- Added `_stamp_verified(path: Path) -> None` to `runner/loop.py`, just before `_perform_squash_merge()`. Reads a concept file, and if it has YAML frontmatter (`---`-delimited), appends `{ by: "human", at: <today's UTC ISO date> }` to a flow-style `verified: [...]` list — creating the key if absent, preserving prior entries if present. No-ops on files without frontmatter. Pure string splitting (matches `_parse_frontmatter()` in `runner/drivers/claude.py`), no PyYAML dependency added.
+- Added `TestStampVerified` to `runner/test_loop.py` (5 tests: no-op on missing/unterminated frontmatter, adding the `verified` key when absent, appending to an existing list, replacing a non-list value) covering `_stamp_verified()` directly, since it isn't wired into `_perform_squash_merge()` yet.
+- Not wired into `_perform_squash_merge()` yet (task 6) — out of scope for this task. 127 tests passing.
+
+## 2026-08-12 — Task 5: `_stamp_verified()` frontmatter-case tests
+
+### Done
+- `TestStampVerified` from task 4 already covered cases (a) no-key-absent, (b) existing-list-append, (c) no-frontmatter no-op. Added the missing case (d) as its own method, `test_verified_entry_has_by_human_and_todays_date`: asserts `by` is `"human"` and `at` equals today's real ISO date (via the actual system clock, not the monkeypatched fixed date used by the other cases). 128 tests passing.
+
+## 2026-08-12 — Task 6: Wire `_stamp_verified()` into `_perform_squash_merge()`
+
+### Done
+- In `_perform_squash_merge()`, after `git merge --squash` succeeds and before `git commit`, run `git diff --cached --name-only`, filter to paths matching `memory/concepts/*.md` (excluding `index.md`), call `_stamp_verified()` on each, then `git add` the modified file back so the stamp lands inside the squash commit itself rather than as a leftover unstaged change. `AGENTS.md` is untouched since it never matches the glob.
+- Added `test_merge_y_stamps_verified_into_staged_concept_files` to `TestOfferMerge` in `runner/test_loop.py`: creates a branch that adds `memory/concepts/widgets.md` (with frontmatter) and `memory/concepts/index.md`, drives `_offer_merge()` with `input="y"`, and asserts `widgets.md` gets a `verified:` stamp, `index.md` does not, and `git status` is clean afterward (stamp is part of the squash commit). 129 tests passing.
+
+## 2026-08-12 — Task 7: `_perform_squash_merge()` verification integration tests
+
+### Done
+- Added `TestPerformSquashMergeVerification` to `runner/test_loop.py`, calling `_perform_squash_merge()` directly (not through `_offer_merge()`) against a real git repo in `tmp_path`. `test_committed_concept_file_gets_verified_stamp` builds a branch adding `memory/concepts/test-concept.md`, merges it into main, and asserts via `git show HEAD:...` that the *committed* content has `verified: [{ by: "human", at: <today's real ISO date> }]` and the working tree is clean. `test_branch_with_only_non_concept_files_skips_stamping` builds a branch touching only `a.txt`, patches `_stamp_verified` to assert it's never called, and confirms the commit still succeeds. 131 tests passing, `sensors/lint.sh` clean.

@@ -1149,33 +1149,35 @@ def _run_one_task(
         f"Task to implement from {plan_abs} (today: {datetime.now(tz=UTC).date().isoformat()}):\n"
         f"{task_text}"
     )
-    worker_result = driver.run(worker_prompt, context_files=task_context, cwd=handle.path)
+    try:
+        worker_result = driver.run(worker_prompt, context_files=task_context, cwd=handle.path)
 
-    if worker_result.exit_code != 0:
-        return _handle_worker_failure(worker_result, i, total, handle, project_root)
+        if worker_result.exit_code != 0:
+            return _handle_worker_failure(worker_result, i, total, handle, project_root)
 
-    worker_summary = _worker_summary(worker_result.text)
-    cost_str = f" (${worker_result.cost_usd:.4f})" if worker_result.cost_usd is not None else ""
-    print(f"[worker:done]   Task {i}/{total}: OK{cost_str} — \"{worker_summary}\"")
-    sys.stdout.flush()
-
-    if _file_hash(status_abs) == status_hash_before:
-        print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
+        worker_summary = _worker_summary(worker_result.text)
+        cost_str = f" (${worker_result.cost_usd:.4f})" if worker_result.cost_usd is not None else ""
+        print(f"[worker:done]   Task {i}/{total}: OK{cost_str} — \"{worker_summary}\"")
         sys.stdout.flush()
 
-    narrative_partial, failures = _run_task_checks(
-        driver, handle, i, total, task_text, plan_abs, agents_abs, status_abs, task_context, review_critiques
-    )
-    if narrative_partial is None:
-        return _handle_sensor_failure(failures, i, total, handle, project_root)
+        if _file_hash(status_abs) == status_hash_before:
+            print(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
+            sys.stdout.flush()
 
-    narrative = {"num": i, "title": _task_title(task_text), "summary": worker_summary, **narrative_partial}
+        narrative_partial, failures = _run_task_checks(
+            driver, handle, i, total, task_text, plan_abs, agents_abs, status_abs, task_context, review_critiques
+        )
+        if narrative_partial is None:
+            return _handle_sensor_failure(failures, i, total, handle, project_root)
 
-    _warn_if_leaked(i, total, project_root, status_abs, main_dirty_before)
-    _commit_task(i, _task_title(task_text), handle.path)
-    _print_task_metrics(i, total, run_metrics, calls_before, cost_before)
+        narrative = {"num": i, "title": _task_title(task_text), "summary": worker_summary, **narrative_partial}
 
-    return narrative, narrative_partial["code_health_findings"]
+        _commit_task(i, _task_title(task_text), handle.path)
+        _print_task_metrics(i, total, run_metrics, calls_before, cost_before)
+
+        return narrative, narrative_partial["code_health_findings"]
+    finally:
+        _warn_if_leaked(i, total, project_root, status_abs, main_dirty_before)
 
 
 def _finalize_run(

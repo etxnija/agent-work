@@ -800,3 +800,18 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 
 **Run metrics:** 33 driver call(s), $10.0436, session 484baf3d-b1a6-4cea-8dd5-583a26f8cf68
+
+## 2026-08-12 — Wrap worker-through-return in try/finally
+
+### Done
+- In `_run_one_task()` (`runner/loop.py`), wrapped the body from `driver.run(...)` through the final `return` in a `try:` block and moved the `_warn_if_leaked(...)` call into a `finally:` block, so it fires on every exit path — the `_handle_worker_failure` return, the `_handle_sensor_failure` return, the success-path return, and any future early return or unhandled exception. Previously it only ran on the success path, silently skipping the leaked-file warning on failure returns. 239 tests passing.
+
+## 2026-08-12 — Task 2: `test_worker_failure_after_leak_still_prints_warning`
+
+### Done
+- Added `test_worker_failure_after_leak_still_prints_warning` to `TestRunLoopMainCheckoutLeak` (`runner/test_loop.py`), verifying the prior task's `finally:`-block fix: `_main_checkout_dirty_paths` mocked with `side_effect=[[], ["leaked.py"]]`, `driver.run.return_value = _fail()` to trigger the worker-failure path, `_FakeBranchSandbox` for a truthy branch — asserts `code == 1`, `"wrote outside its sandboxed worktree" in out`, and `"leaked.py" in out`. 133 tests passing.
+
+## 2026-08-12 — Task 3: `test_sensor_failure_after_leak_still_prints_warning`
+
+### Done
+- Added `test_sensor_failure_after_leak_still_prints_warning` to `TestRunLoopMainCheckoutLeak` (`runner/test_loop.py`), covering the third exit path of the `finally:`-block fix: `_main_checkout_dirty_paths` mocked with `side_effect=[[], ["leaked.py"]]`, `driver.run.side_effect = self._worker_ok(tmp_path)` (worker succeeds), `_run_sensors` patched to `return_value=[("lint.sh", "still bad")]` so it fails on every attempt through `SENSOR_RETRY_LIMIT`, `_FakeBranchSandbox` for a truthy branch — asserts `code == 1`, `"wrote outside its sandboxed worktree" in out`, and `"leaked.py" in out`. 241 tests passing repo-wide, `ruff`/`pyright` clean.

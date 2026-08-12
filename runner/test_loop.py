@@ -1545,6 +1545,55 @@ class TestRunLoopMainCheckoutLeak:
         assert "wrote outside its sandboxed worktree" in out
         assert "runner/loop.py" in out
 
+    def test_worker_failure_after_leak_still_prints_warning(self, tmp_path, monkeypatch, capsys):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run.return_value = _fail()
+        gate = MagicMock()
+        gate.request.return_value = True
+        fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
+             patch(
+                 "runner.loop._main_checkout_dirty_paths",
+                 side_effect=[[], ["leaked.py"]],
+             ):
+            code = run_loop("task")
+
+        assert code == 1
+        out = capsys.readouterr().out
+        assert "wrote outside its sandboxed worktree" in out
+        assert "leaked.py" in out
+
+    def test_sensor_failure_after_leak_still_prints_warning(self, tmp_path, monkeypatch, capsys):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        driver.run.side_effect = self._worker_ok(tmp_path)
+        gate = MagicMock()
+        gate.request.return_value = True
+        fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
+             patch("runner.loop._run_sensors", return_value=[("lint.sh", "still bad")]), \
+             patch(
+                 "runner.loop._main_checkout_dirty_paths",
+                 side_effect=[[], ["leaked.py"]],
+             ):
+            code = run_loop("task")
+
+        assert code == 1
+        out = capsys.readouterr().out
+        assert "wrote outside its sandboxed worktree" in out
+        assert "leaked.py" in out
+
 
 # ── Status.md check per task ──────────────────────────────────────────────────
 

@@ -850,3 +850,8 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 ### Done
 - Corrected the docstring of `_main_checkout_dirty_paths` in `runner/loop.py` (lines 199-207): replaced the inaccurate "the one file workers intentionally write there directly via absolute path, by design (see AGENTS.md)" with an accurate rationale — the exclusion tolerates an occasional main-checkout status.md write from the harness's own `_append_status` calls or inconsistent worker behavior, without flagging it as a sandboxing leak. Removed the stale "(see AGENTS.md)" pointer.
+
+## 2026-08-12 — Task 1: `_commit_status_update` helper
+
+### Done
+- Added `_commit_status_update(message: str, project_root: Path) -> None` to `runner/loop.py`, near `_commit_task`. Runs `git add memory/status.md` then `git commit -m <message>` in `project_root` (both `capture_output=True, text=True, check=False`), scoped strictly to `memory/status.md`. On commit failure, prints `[status] Commit failed: {stderr}` and returns without raising, matching `_perform_squash_merge`'s error-handling style. Not yet wired into any call site — that's a later task. 133 tests passing in worktree.

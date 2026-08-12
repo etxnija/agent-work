@@ -613,6 +613,26 @@ def _commit_task(task_num: int, title: str, worktree: Path) -> None:
         print(f"[commit] Warning: commit failed — {commit.stderr.strip()}")
 
 
+def _write_last_run_state(project_root: Path, branch: str, worktree: Path) -> None:
+    """
+    Write branch name and tip commit hash to .agent-last-run.json so a human
+    can find a preserved branch without depending on terminal scrollback.
+    """
+    tip = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    state = {
+        "branch": branch,
+        "tip_commit": tip.stdout.strip(),
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    (project_root / ".agent-last-run.json").write_text(json.dumps(state, indent=2))
+
+
 # ── Merge helper ─────────────────────────────────────────────────────────────
 
 def _branch_commits(branch: str, project_root: Path) -> list[str]:

@@ -40,6 +40,7 @@ from runner.loop import (
     _task_title,
     _update_coverage_baseline,
     _worker_summary,
+    _write_last_run_state,
     _write_narrative,
     run_loop,
 )
@@ -1683,6 +1684,30 @@ class TestCommitTask:
         log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
                              capture_output=True, text=True, check=False).stdout
         assert log.strip().count("\n") == 0  # single commit
+
+
+class TestWriteLastRunState:
+    def test_writes_correct_json_content(self, tmp_path):
+        _init_repo(tmp_path)
+        _write_last_run_state(tmp_path, "agent/fake-branch", tmp_path)
+
+        state_file = tmp_path / ".agent-last-run.json"
+        assert state_file.exists()
+        state = json.loads(state_file.read_text())
+        assert set(state.keys()) == {"branch", "tip_commit", "timestamp"}
+        assert state["branch"] == "agent/fake-branch"
+
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path,
+                               capture_output=True, text=True, check=False).stdout.strip()
+        assert state["tip_commit"] == head
+
+    def test_overwrites_previous_file(self, tmp_path):
+        _init_repo(tmp_path)
+        _write_last_run_state(tmp_path, "agent/first-branch", tmp_path)
+        _write_last_run_state(tmp_path, "agent/second-branch", tmp_path)
+
+        state = json.loads((tmp_path / ".agent-last-run.json").read_text())
+        assert state["branch"] == "agent/second-branch"
 
 
 class TestMainCheckoutDirtyPaths:

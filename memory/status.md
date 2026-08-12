@@ -740,6 +740,13 @@ worktree-isolation root cause is also still open if it's worth another look.
 - Added immediate `sys.stdout.flush()` after printing start/done log lines so task titles, active steps, worker summaries, and review verdicts appear instantly on screen before blocking sub-agent calls begin.
 - Preserved backward-compatible tag strings for existing mock assertion tests (all 219 tests passing cleanly).
 
+## 2026-08-12 — Robustness-fixes plan task 2: durable state file helper
+
+### Done
+- Added `_write_last_run_state(project_root, branch, worktree)` to `runner/loop.py` (near `_commit_task` in the git helpers section): runs `git rev-parse HEAD` in `worktree`, writes `{"branch", "tip_commit", "timestamp"}` as indented JSON to `project_root / ".agent-last-run.json"`. Not yet wired into any call sites (that's plan task 3).
+- Added `.agent-last-run.json` to `.gitignore`.
+- Added `TestWriteLastRunState` (`test_writes_correct_json_content`, `test_overwrites_previous_file`) to `runner/test_loop.py` near `TestCommitTask`, using the module-level `_init_repo` helper. Full suite (115 tests in this file) and `ruff check .` both pass.
+
 
 
 

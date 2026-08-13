@@ -880,3 +880,6 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 ### Done
 - Added `TestBootstrapAgentFiles.test_existing_agent_file_is_not_clobbered` to `bootstrap/test_bootstrap.py`, mirroring `test_existing_coveragerc_is_not_clobbered`: pre-creates `agents/planner.md` with custom content before calling `bootstrap(tmp_path, "python")`, then asserts the content is unchanged, verifying `_copy_if_missing`'s don't-clobber guard. All 5 tests in the file pass.
+
+
+**Run metrics:** 25 driver call(s), $6.1164, session a0da4335-d4c2-455a-bc67-d77cb79fc17a

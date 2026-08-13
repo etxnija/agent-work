@@ -855,3 +855,28 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 ### Done
 - Added `_commit_status_update(message: str, project_root: Path) -> None` to `runner/loop.py`, near `_commit_task`. Runs `git add memory/status.md` then `git commit -m <message>` in `project_root` (both `capture_output=True, text=True, check=False`), scoped strictly to `memory/status.md`. On commit failure, prints `[status] Commit failed: {stderr}` and returns without raising, matching `_perform_squash_merge`'s error-handling style. Not yet wired into any call site — that's a later task. 133 tests passing in worktree.
+
+## 2026-08-12 — Task 1: Replace single-file copy with glob loop in bootstrap.py
+
+### Done
+- Replaced the hardcoded `planner.md`-only copy block in `bootstrap/bootstrap.py:bootstrap()` with `for src in sorted((HARNESS_ROOT / "agents").glob("*.md"))`, copying every sub-agent definition (currently `architect.md`, `planner.md`, `refactor.md`, `reviewer.md`) into both `project_dir / "agents"` and `project_dir / ".claude" / "agents"`. Preserves the skip-if-exists behavior and print format. New projects now get the full sub-agent set instead of just the planner. 3 existing bootstrap tests still pass unmodified (none previously asserted on the copy set).
+
+## 2026-08-12 — Task 2: Update the inline comment in bootstrap.py
+
+### Done
+- Verified `bootstrap/bootstrap.py:242` already reads `# Copy sub-agent definitions` — Task 1's rewrite of the copy block already updated this comment, so no further code change was needed for this task.
+
+## 2026-08-12 — Task 3: Update the module docstring
+
+### Done
+- Changed `bootstrap/bootstrap.py:15` from `agents/             planner sub-agent (for Claude Code interactive sessions)` to `agents/             sub-agent definitions (for Claude Code interactive sessions)`, matching line 12's wording so the docstring no longer implies only the planner is copied into `.claude/agents/`.
+
+## 2026-08-12 — Task 4: Test all four agent files exist after bootstrap
+
+### Done
+- Added `TestBootstrapAgentFiles.test_all_agent_files_copied` to `bootstrap/test_bootstrap.py`: calls `bootstrap(tmp_path, "python")` and hard-codes the four expected names (`planner.md`, `reviewer.md`, `refactor.md`, `architect.md`), asserting each exists in both `tmp_path / "agents"` and `tmp_path / ".claude" / "agents"`. All 4 tests in the file pass.
+
+## 2026-08-12 — Task 5: Test existing agent file is not overwritten
+
+### Done
+- Added `TestBootstrapAgentFiles.test_existing_agent_file_is_not_clobbered` to `bootstrap/test_bootstrap.py`, mirroring `test_existing_coveragerc_is_not_clobbered`: pre-creates `agents/planner.md` with custom content before calling `bootstrap(tmp_path, "python")`, then asserts the content is unchanged, verifying `_copy_if_missing`'s don't-clobber guard. All 5 tests in the file pass.

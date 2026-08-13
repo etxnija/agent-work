@@ -12,7 +12,7 @@ Creates:
         agents/                 sub-agent definitions (populated from harness)
         sensors/                lint/test/lsp scripts (language-specific stubs)
         .claude/
-            agents/             planner sub-agent (for Claude Code interactive sessions)
+            agents/             sub-agent definitions (for Claude Code interactive sessions)
             settings.json       permissions allow/deny list + PreToolUse hook registration
             hooks/
                 block-destructive.sh    blocks rm -rf, force-push, sudo, etc.
@@ -205,10 +205,28 @@ def _settings_json(lang: str) -> str:
     ) + "\n"
 
 
-def bootstrap(project_dir: Path, lang: str) -> None:
-    if project_dir.exists() and any(project_dir.iterdir()):
-        print(f"Warning: {project_dir} is not empty. Skipping existing files.")
+def _write_if_missing(path: Path, content: str, project_dir: Path) -> None:
+    if not path.exists():
+        path.write_text(content)
+        print(f"  created {path.relative_to(project_dir)}")
 
+
+def _write_executable_if_missing(path: Path, content: str, project_dir: Path) -> None:
+    if not path.exists():
+        path.write_text(content)
+        path.chmod(0o755)
+        print(f"  created {path.relative_to(project_dir)}")
+
+
+def _copy_if_missing(src: Path, dest: Path, project_dir: Path, executable: bool = False) -> None:
+    if not dest.exists() and src.exists():
+        shutil.copy(src, dest)
+        if executable:
+            dest.chmod(0o755)
+        print(f"  created {dest.relative_to(project_dir)}")
+
+
+def _make_dirs(project_dir: Path) -> None:
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "memory").mkdir(exist_ok=True)
     (project_dir / "agents").mkdir(exist_ok=True)
@@ -216,80 +234,57 @@ def bootstrap(project_dir: Path, lang: str) -> None:
     (project_dir / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
     (project_dir / ".claude" / "hooks").mkdir(parents=True, exist_ok=True)
 
-    # AGENTS.md
-    agents_md = project_dir / "AGENTS.md"
-    if not agents_md.exists():
-        agents_md.write_text(
-            AGENTS_MD_TEMPLATE.format(
-                lang=lang or "not specified",
-                lang_testing=LANG_TESTING.get(lang, ""),
-            )
-        )
-        print(f"  created {agents_md.relative_to(project_dir)}")
 
-    # memory/status.md
+def _copy_subagents(project_dir: Path) -> None:
+    for src in sorted((HARNESS_ROOT / "agents").glob("*.md")):
+        for dest_dir in [project_dir / "agents", project_dir / ".claude" / "agents"]:
+            _copy_if_missing(src, dest_dir / src.name, project_dir)
+
+
+def _write_sensors(project_dir: Path, lang: str) -> None:
+    for name, content in SENSORS.get(lang, SENSORS[""]).items():
+        _write_executable_if_missing(project_dir / "sensors" / name, content, project_dir)
+
+
+def bootstrap(project_dir: Path, lang: str) -> None:
     from datetime import UTC, datetime
-    status_md = project_dir / "memory" / "status.md"
-    if not status_md.exists():
-        status_md.write_text(
-            STATUS_MD_TEMPLATE.format(
-                date=datetime.now(tz=UTC).date().isoformat(),
-                lang=lang or "not specified",
-            )
-        )
-        print(f"  created {status_md.relative_to(project_dir)}")
 
-    # Copy planner sub-agent
-    src_planner = HARNESS_ROOT / "agents" / "planner.md"
-    for dest_dir in [project_dir / "agents", project_dir / ".claude" / "agents"]:
-        dest = dest_dir / "planner.md"
-        if not dest.exists() and src_planner.exists():
-            shutil.copy(src_planner, dest)
-            print(f"  created {dest.relative_to(project_dir)}")
+    if project_dir.exists() and any(project_dir.iterdir()):
+        print(f"Warning: {project_dir} is not empty. Skipping existing files.")
 
-    # CLAUDE.md — bridges interactive Claude Code sessions to AGENTS.md and status.md
-    claude_md = project_dir / "CLAUDE.md"
-    if not claude_md.exists():
-        claude_md.write_text(CLAUDE_MD_TEMPLATE)
-        print(f"  created {claude_md.relative_to(project_dir)}")
+    _make_dirs(project_dir)
 
-    # mise.toml — makes `agent` available without `mise exec` prefix
-    mise_toml = project_dir / "mise.toml"
-    if not mise_toml.exists():
-        mise_toml.write_text(
-            MISE_TOML_TEMPLATE.format(python_version=_harness_python_version())
-        )
-        print(f"  created {mise_toml.relative_to(project_dir)}")
+    _write_if_missing(
+        project_dir / "AGENTS.md",
+        AGENTS_MD_TEMPLATE.format(lang=lang or "not specified", lang_testing=LANG_TESTING.get(lang, "")),
+        project_dir,
+    )
+    _write_if_missing(
+        project_dir / "memory" / "status.md",
+        STATUS_MD_TEMPLATE.format(date=datetime.now(tz=UTC).date().isoformat(), lang=lang or "not specified"),
+        project_dir,
+    )
+    _copy_subagents(project_dir)
+    _write_if_missing(project_dir / "CLAUDE.md", CLAUDE_MD_TEMPLATE, project_dir)
+    _write_if_missing(
+        project_dir / "mise.toml",
+        MISE_TOML_TEMPLATE.format(python_version=_harness_python_version()),
+        project_dir,
+    )
 
-    # .coveragerc — project-agnostic coverage source/omit config (pytest-cov only)
     if lang == "python":
-        coveragerc = project_dir / ".coveragerc"
-        if not coveragerc.exists():
-            coveragerc.write_text(COVERAGERC_TEMPLATE)
-            print(f"  created {coveragerc.relative_to(project_dir)}")
+        _write_if_missing(project_dir / ".coveragerc", COVERAGERC_TEMPLATE, project_dir)
 
-    # Sensor scripts
-    scripts = SENSORS.get(lang, SENSORS[""])
-    for name, content in scripts.items():
-        sensor = project_dir / "sensors" / name
-        if not sensor.exists():
-            sensor.write_text(content)
-            sensor.chmod(0o755)
-            print(f"  created {sensor.relative_to(project_dir)}")
+    _write_sensors(project_dir, lang)
 
-    # .claude/settings.json — permissions allow/deny + hook registration
-    settings = project_dir / ".claude" / "settings.json"
-    if not settings.exists():
-        settings.write_text(_settings_json(lang))
-        print(f"  created {settings.relative_to(project_dir)}")
+    _write_if_missing(project_dir / ".claude" / "settings.json", _settings_json(lang), project_dir)
 
-    # .claude/hooks/block-destructive.sh — copied from the harness
-    src_hook = HARNESS_ROOT / ".claude" / "hooks" / "block-destructive.sh"
-    dest_hook = project_dir / ".claude" / "hooks" / "block-destructive.sh"
-    if not dest_hook.exists() and src_hook.exists():
-        shutil.copy(src_hook, dest_hook)
-        dest_hook.chmod(0o755)
-        print(f"  created {dest_hook.relative_to(project_dir)}")
+    _copy_if_missing(
+        HARNESS_ROOT / ".claude" / "hooks" / "block-destructive.sh",
+        project_dir / ".claude" / "hooks" / "block-destructive.sh",
+        project_dir,
+        executable=True,
+    )
 
     print(f"\nDone. Project ready at {project_dir}")
     print("Next: edit AGENTS.md with project-specific conventions, then run the planner.")

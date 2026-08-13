@@ -51,7 +51,8 @@ Language: {lang}
 - (add things that have tripped agents up)
 
 ## Testing
-- Run all tests before committing
+- Sensors (sensors/test.sh, sensors/lint.sh) run automatically after every task; you
+  do not need a task for this
 - New code must have tests; do not delete tests to make coverage pass
 {lang_testing}
 

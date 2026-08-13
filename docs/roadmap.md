@@ -164,6 +164,40 @@ model correction would otherwise be spent on.
 
 ---
 
+## Phase 2.6 — Code-health sensor
+
+Goal: a deterministic, cheap check for length/complexity/duplication that fits the
+existing sensor-retry shape, catching what lint/test/type-checks don't. Retry-then-
+tolerate (like Review), not fail-closed like the other sensors — a threshold is
+inherently a little arbitrary, unlike a lint error.
+
+| Item | Status |
+|---|---|
+| `runner/code_health.py` — `lizard`-based length/complexity/duplication check on `git diff --name-only main`, file-level scope | ✅ |
+| `_run_code_health_with_retry()` — `CODE_HEALTH_RETRY_LIMIT = 2`, retry-then-tolerate, sequenced after sensors (hard), before review (soft) | ✅ |
+| Test files excluded from the check entirely — first live run flagged 71 findings, all from the duplicate-detector matching legitimate repetitive test-fixture helpers, which lizard has no concept of being intentional | ✅ |
+
+---
+
+## Phase 2.7 — Token/cost optimization
+
+Goal: cut real, observed per-run token/dollar cost without weakening the sensor/review
+gates. Motivated by live cost data from Phase 2.2/2.3 showing individual reviewer
+calls running 25+ turns and 700k+ cache-read tokens for a job that should be
+read-diff-and-verdict.
+
+| Item | Status |
+|---|---|
+| `memory/concepts/*.md` — OKF-lite concept bundles (YAML frontmatter: type/tags/summary/links/updated) as durable, tagged, bounded context, replacing the heavyweight `[plan_abs, agents_abs, status_abs]` bundle for worker/corrective/review calls | ✅ |
+| `_parse_task_concepts()` — explicit `Concepts:` line in a task, falling back to automated tag-matching against concept frontmatter when omitted | ✅ |
+| Prompt caching — static instruction text hoisted into module-level constants, `AGENTS.md` pre-injected via `context_files` ahead of dynamic task/diff content, so repeated prefixes actually cache | ✅ |
+| `MAX_DIFF_LINES = 500` — reviewer's diff capped with a disclosed `"[diff truncated: N lines omitted]"` marker, not silent | ✅ |
+| `agents/reviewer.md` bounded — explicit division of labor with sensors (don't re-derive mechanical checks), exploration capped at 1-3 targeted Read/Grep calls, excessive exploration reframed as a complexity signal rather than thoroughness | ✅ |
+| Real-time `:start`/`:done` progress logging + immediate `sys.stdout.flush()` across the per-task pipeline | ✅ |
+| **Planner's own status.md read is still unbounded** — reads the entire file (111KB+ and growing) unconditionally every planning call, on the most expensive model (`claude-opus-4-6`); the one place in the pipeline not yet covered by this optimization pass | pending — blocked was on durable memory currency (now built, not yet verified reliable — see Phase 3) |
+
+---
+
 ## Phase 3 — Feedback flywheel
 
 Goal: the loop learns across sessions and recovers from known failure modes without human intervention.
@@ -171,13 +205,18 @@ Goal: the loop learns across sessions and recovers from known failure modes with
 | Item | Status |
 |---|---|
 | Work log (memory/status.md) written by worker after each run | ✅ (basic — from Phase 1) |
-| **Durable memory currency (AGENTS.md + memory/concepts/\*.md)** — supersedes the separate "External memory" line above; same problem (nothing keeps durable memory current — the Worker's only memory-writing rule targets `memory/status.md`, one-line append per task), same fix for both files. Design decided 2026-08-12, external-reviewed: extend `WORKER_STATIC_INSTRUCTIONS` so the Worker — already holding full task context in the same session — updates AGENTS.md (convention change) or the matching `memory/concepts/*.md` file (component/pattern/decision change) when a task's diff represents durable knowledge, citing the task summary; new concept files follow the existing frontmatter schema (type/tags/summary/links/updated) and get added to `memory/concepts/index.md`. Chosen over a separate post-hoc "learning" pass: zero extra driver calls (rides the existing worker session), and the update lands inside the task's own commit, so the human reviews the memory change alongside the code change at the existing merge-diff gate — no new approval mechanism needed. Categorical filter (only decision/component/pattern-shaped changes, not every task) is the guard against noise. Needed as a prerequisite for trimming the Planner's status.md read to a bounded tail — a tail-only trim is unsafe if concept bundles are the intended fallback for older-but-still-relevant context and nothing keeps them current. Distinct from "Memory compaction" below (Phase 4): compaction shrinks status.md itself; this keeps the separate durable layer in sync with it. | pending |
+| **Status.md ownership fix (2026-08-12)** — corrected inaccurate documentation (`AGENTS.md` gotcha, `_main_checkout_dirty_paths()` docstring both claimed workers write status.md to the main checkout "by design"; actual behavior is the Worker writes into the worktree, which is the better property — the entry travels with its task's commit, so an abandoned task's narrative is abandoned too). Fixed the one piece that was actually broken: the harness's own two run-level `_append_status()` calls (run-metrics, plan-rejected) left permanent uncommitted dirty state since nothing committed them — now auto-committed immediately via `_commit_status_update()`, scoped strictly to `memory/status.md` so it can never sweep up an unrelated dirty file (e.g. an unreviewed leak). This is what caused a real stash-pop merge conflict earlier the same night. | ✅ |
+| **Durable memory currency (AGENTS.md + memory/concepts/\*.md)** — built and merged 2026-08-12: `WORKER_STATIC_INSTRUCTIONS` rule 4, extended so the Worker updates AGENTS.md (convention change) or the matching `memory/concepts/*.md` file (component/pattern/decision change) when a task represents durable knowledge, citing the task summary; new concept files follow the existing frontmatter schema and get added to `memory/concepts/index.md`; `_stamp_verified()` wired into `_perform_squash_merge()` so any concept file in a squash gets a `verified: [{by: "human", at}]` stamp at the moment a human approves the merge. **Reliability unproven**: 0-for-2 on its first live run — two tasks that clearly matched the rule's own criteria (adding `_stamp_verified()`; wiring it into the merge path) triggered no concept-file update at all. Needs a deliberate test task designed to trigger it before being trusted, and/or a stronger instruction. | ✅ built, not yet verified reliable |
+| **Worker status.md write-location is inconsistent within a single run** — confirmed directly (2026-08-12): of 8 tasks in one run, 7 wrote their status.md entry into the worktree (correct/expected), 1 wrote directly to the main checkout instead, with no path given to explain the difference — same instruction, same session shape. Blocked that run's own squash-merge. Not yet root-caused or fixed. | root cause open |
+| **Review-warning timing is misleading** — `[warning] Worker did not update memory/status.md after task N` is checked once, right after the *first* worker call, before sensors/code-health/review-corrective retries run; a later corrective call in the same task's cycle can still close the gap, making the warning stale by the time the task actually finishes. Confirmed 2026-08-12. Minor, not yet fixed. | known gap |
 | Error recovery templates for recurring failure modes | pending |
 | Per-task git commit in worktree branch | ✅ |
 | Interactive merge prompt after successful run (y/n fast-forward into main) | ✅ |
 | Merge prompt opens the branch's diff in a floating Zellij pane (`$EDITOR`) before asking y/n — personal workflow convenience, no-op outside Zellij | ✅ |
 | PR creation for review | pending |
-| **Keep the branch on task failure instead of `git branch -D`** — `handle.keep()` is now called (with a `[loop]` message naming the branch and completed-task count) when sensors are still failing after `SENSOR_RETRY_LIMIT` is exhausted, at both the post-worker and post-review-corrective sensor checks; a hard worker-execution failure (non-zero exit) still discards the branch, unchanged — a narrower fix than "any task failure," by design (`runner/loop.py`, `runner/sandbox/worktree.py`) | ✅ |
+| **Keep the branch on task failure instead of `git branch -D`** — `handle.keep()` is called (with a `[loop]` message naming the branch and completed-task count) on sensor-retry exhaustion, sensor regression during review, **and now hard worker-execution failure too** (2026-08-12 — closes the gap this line used to call out as unfixed; triggered for real twice — an agent-work credits-exhaustion incident and a task-cli spend-limit incident — before it was fixed) | ✅ |
+| `.agent-last-run.json` — durable record of the preserved branch's name/tip-commit/timestamp at every branch-preservation point, so recovery doesn't depend on terminal scrollback (2026-08-12) | ✅ |
+| **Leak check on every task exit path, not just success** — `_run_one_task`'s body wrapped in `try/finally`, `_warn_if_leaked` moved into the `finally` so a leaked write is reported on worker failure and sensor-exhaustion too, not only the happy path (2026-08-12) | ✅ |
 | `agent loop --resume` — detect an existing `agent/*` branch with completed task commits, skip them, continue from the first incomplete task | pending — separate follow-on, still blocked on other design questions (not this dependency) |
 | `agent loop --plan <path>` (or auto-detected prompt) — approve/execute an existing `plan.md` without re-running the planner | pending |
 
@@ -191,6 +230,9 @@ Phase 2.3 — PRD, 2026-08-04.)
 | Item | Status |
 |---|---|
 | Worker sandboxing (container/VM) — **required before FileGate and Ralph loop**; motivated further by the `cwd`-isolation leak found in Phase 1.1 (worktree sharing the main repo's `.git` isn't a hard boundary) | pending |
+| Refactor sub-agent (`agent refactor <path>`) — read-only, pattern-drift/duplication findings, no `model:` field yet | ✅ |
+| Architecture sub-agent (`agent architect [hint]`) — CLAIM/EXTRACT/DOUBT/RECONCILE bounded-cycle review, always whole-project scope with an optional free-text hint, `model: claude-opus-4-6`, AGENTS.md/roadmap/ADRs read as a required first step so findings are grounded in *why* the code is shaped that way, not just its current shape | ✅ |
+| Native model routing — subagent `model:` frontmatter now actually takes effect (`ClaudeDriver` parses and passes `--model`); `planner.md`'s `claude-opus-4-6` and `reviewer.md`'s `claude-haiku-4-5` are the first real uses | ✅ |
 | FileGate (headless approval via sentinel file) | pending — blocked by sandboxing |
 | Ralph loop (iterative: pick task → implement → validate → commit → reset → repeat) | pending — blocked by sandboxing |
 | Memory compaction (summarise status.md when it grows large) | pending |

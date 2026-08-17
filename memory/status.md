@@ -894,3 +894,12 @@ worktree-isolation root cause is also still open if it's worth another look.
 ## 2026-08-17 — plan rejected
 Task: make archteture diagram
 Plan written but not approved by human.
+
+## 2026-08-17 — Create agents/worker.md and add frontmatter-loading test
+
+### Done
+- Added `agents/worker.md` (same frontmatter shape as the other four agents, no `tools:`/`model:` fields) documenting the Worker's persona and its five operational rules, mirroring `WORKER_STATIC_INSTRUCTIONS` in `runner/loop.py:46-57`.
+- Added `test_worker_definition_has_no_tools_no_model` to `TestLoadAgentDefinition` in `runner/drivers/test_claude.py`, loading the real `agents/worker.md` via a monkeypatched `_AGENT_SEARCH_PATHS` and asserting `tools == []` and `model is None`.
+
+
+**Run metrics:** 7 driver call(s), $9.5197, session a6a46291-a0f4-48ac-8e22-d9afb3252b64

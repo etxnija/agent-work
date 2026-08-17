@@ -43,18 +43,7 @@ REVIEW_APPROVED_SIGNAL = "REVIEW: APPROVED"
 REVIEW_CHANGES_SIGNAL = "REVIEW: CHANGES REQUESTED"
 REVIEW_RETRY_LIMIT = 2
 
-WORKER_STATIC_INSTRUCTIONS = (
-    "You are an autonomous software engineering worker implementing a single task.\n"
-    "Follow these rules strictly:\n"
-    "1. Follow all conventions in AGENTS.md.\n"
-    "2. Implement only the assigned task — do not work ahead to other tasks.\n"
-    "3. After completing, append a one-line summary of what you did to memory/status.md.\n"
-    "4. Update durable memory (AGENTS.md for conventions, memory/concepts/*.md for "
-    "components/patterns/decisions) when the task represents lasting knowledge. New concept "
-    "files must include `generated: { by: worker, at: <ISO 8601> }` frontmatter and an entry "
-    "in memory/concepts/index.md.\n"
-    "5. End your response with a line starting with 'SUMMARY: ' followed by one sentence on what changed and why."
-)
+WORKER_AGENT = "worker"
 
 SENSOR_CORRECTIVE_INSTRUCTIONS = (
     "Your last change to this task produced sensor issues. "
@@ -1167,13 +1156,12 @@ def _run_one_task(
     status_hash_before = _file_hash(status_abs)
     main_dirty_before = _main_checkout_dirty_paths(project_root, status_abs)
 
-    worker_prompt = (
-        f"{WORKER_STATIC_INSTRUCTIONS}\n\n"
+    task_prompt = (
         f"Task to implement from {plan_abs} (today: {datetime.now(tz=UTC).date().isoformat()}):\n"
         f"{task_text}"
     )
     try:
-        worker_result = driver.run(worker_prompt, context_files=task_context, cwd=handle.path)
+        worker_result = driver.run_subagent(WORKER_AGENT, task_prompt, context_files=task_context, cwd=handle.path)
 
         if worker_result.exit_code != 0:
             return _handle_worker_failure(worker_result, i, total, handle, project_root)

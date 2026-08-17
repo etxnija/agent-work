@@ -1,6 +1,7 @@
 """Tests for ClaudeDriver and its helpers."""
 
 import json
+from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
@@ -100,6 +101,14 @@ class TestLoadAgentDefinition:
         body, _, model = _load_agent_definition("reviewer")
         assert body == "You review."
         assert model == "claude-opus-4-6"
+
+    def test_worker_definition_has_no_tools_no_model(self, monkeypatch):
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [Path("agents")])
+
+        _, tools, model = _load_agent_definition("worker")
+        assert tools == []
+        assert model is None
 
     def test_not_found_returns_none_and_empty(self, tmp_path, monkeypatch):
         import runner.drivers.claude as mod

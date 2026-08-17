@@ -2,7 +2,6 @@
 
 import json
 import os
-import re
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,7 +21,7 @@ from runner.loop import (
     REVIEW_RETRY_LIMIT,
     REVIEWER_AGENT,
     SENSOR_RETRY_LIMIT,
-    WORKER_STATIC_INSTRUCTIONS,
+    WORKER_AGENT,
     _append_narrative_outcome,
     _branch_commits,
     _build_narrative,
@@ -90,11 +89,20 @@ def _fail(text="error", session_id=None) -> AgentResult:
     return AgentResult(text=text, exit_code=1, session_id=session_id)
 
 
-def _plan_then_approve(agent_name, prompt, context_files=None, cwd=None) -> AgentResult:
-    """run_subagent side_effect: PLAN READY for the planner, approved for the reviewer."""
-    if agent_name == REVIEWER_AGENT:
-        return _ok(REVIEW_APPROVED_SIGNAL)
-    return _ok(PLAN_READY_SIGNAL)
+def _route_subagent(worker=None):
+    """
+    run_subagent side_effect factory: PLAN READY for the planner, approved for
+    the reviewer, and delegates to `worker` (or a plain _ok()) for the worker.
+    """
+    def _route(agent_name, prompt, context_files=None, cwd=None) -> AgentResult:
+        if agent_name == REVIEWER_AGENT:
+            return _ok(REVIEW_APPROVED_SIGNAL)
+        if agent_name == WORKER_AGENT:
+            if worker is not None:
+                return worker(prompt, context_files=context_files, cwd=cwd)
+            return _ok()
+        return _ok(PLAN_READY_SIGNAL)
+    return _route
 
 
 MINIMAL_PLAN = """\
@@ -732,14 +740,13 @@ class TestRunLoopPerTask:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
 
         def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
             status.write_text(status.read_text() + "- done\n")
             return _ok()
 
-        driver.run.side_effect = worker_side_effect
+        driver.run_subagent.side_effect = _route_subagent(worker_side_effect)
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -750,20 +757,58 @@ class TestRunLoopPerTask:
             code = run_loop("task")
 
         assert code == 0
-        assert driver.run.call_count == 2  # one per task
+        worker_calls = [c for c in driver.run_subagent.call_args_list if c.args[0] == WORKER_AGENT]
+        assert len(worker_calls) == 2  # one per task
+        driver.run.assert_not_called()
 
-    def test_each_worker_call_contains_only_its_task(self, tmp_path, monkeypatch):
-        self._setup(tmp_path, monkeypatch)
+    def test_fresh_task_invokes_run_subagent_with_worker_agent(self, tmp_path, monkeypatch):
+        """
+        The fresh-task call site must go through driver.run_subagent(WORKER_AGENT, ...),
+        not the raw driver.run() — and the prompt must no longer carry a manually
+        prepended static-instructions preamble, since run_subagent injects the
+        worker's agent body (agents/worker.md) automatically.
+        """
+        self._setup(tmp_path, monkeypatch, plan=SINGLE_TASK_PLAN)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
 
         def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
             status.write_text(status.read_text() + "- done\n")
             return _ok()
 
-        driver.run.side_effect = worker_side_effect
+        driver.run_subagent.side_effect = _route_subagent(worker_side_effect)
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("builtins.print"):
+            code = run_loop("task")
+
+        assert code == 0
+        driver.run.assert_not_called()
+        worker_calls = [c for c in driver.run_subagent.call_args_list if c.args[0] == WORKER_AGENT]
+        assert len(worker_calls) == 1
+        worker_prompt = worker_calls[0].args[1]
+        assert "Task to implement from" in worker_prompt
+        assert (
+            "You are an autonomous software engineering worker implementing a single task."
+            not in worker_prompt
+        )
+
+    def test_each_worker_call_contains_only_its_task(self, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+
+        driver = MagicMock()
+
+        def worker_side_effect(prompt, context_files, cwd=None):
+            status = tmp_path / "memory" / "status.md"
+            status.write_text(status.read_text() + "- done\n")
+            return _ok()
+
+        driver.run_subagent.side_effect = _route_subagent(worker_side_effect)
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -773,8 +818,9 @@ class TestRunLoopPerTask:
              patch("builtins.print"):
             run_loop("task")
 
-        first_prompt = driver.run.call_args_list[0][0][0]
-        second_prompt = driver.run.call_args_list[1][0][0]
+        worker_calls = [c for c in driver.run_subagent.call_args_list if c.args[0] == WORKER_AGENT]
+        first_prompt = worker_calls[0].args[1]
+        second_prompt = worker_calls[1].args[1]
         assert "Add config" in first_prompt
         assert "Add tests" in second_prompt
         # Each call is scoped to its task
@@ -785,14 +831,13 @@ class TestRunLoopPerTask:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
 
         def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
             status.write_text(status.read_text() + "- done\n")
             return _ok()
 
-        driver.run.side_effect = worker_side_effect
+        driver.run_subagent.side_effect = _route_subagent(worker_side_effect)
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -803,15 +848,16 @@ class TestRunLoopPerTask:
             run_loop("task")
 
         # NoopSandbox yields project_root as the workspace path
-        for call in driver.run.call_args_list:
-            assert call[1]["cwd"] == tmp_path.resolve()
+        worker_calls = [c for c in driver.run_subagent.call_args_list if c.args[0] == WORKER_AGENT]
+        assert worker_calls
+        for call in worker_calls:
+            assert call.kwargs["cwd"] == tmp_path.resolve()
 
     def test_stops_on_first_task_failure(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
-        driver.run.return_value = _fail("task 1 broke")
+        driver.run_subagent.side_effect = _route_subagent(lambda *a, **k: _fail("task 1 broke"))
 
         gate = MagicMock()
         gate.request.return_value = True
@@ -823,14 +869,14 @@ class TestRunLoopPerTask:
             code = run_loop("task")
 
         assert code == 1
-        assert driver.run.call_count == 1  # stopped after first failure
+        worker_calls = [c for c in driver.run_subagent.call_args_list if c.args[0] == WORKER_AGENT]
+        assert len(worker_calls) == 1  # stopped after first failure
 
     def test_worker_hard_failure_preserves_branch(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
-        driver.run.return_value = _fail("task 1 broke")
+        driver.run_subagent.side_effect = _route_subagent(lambda *a, **k: _fail("task 1 broke"))
 
         gate = MagicMock()
         gate.request.return_value = True
@@ -861,7 +907,6 @@ class TestRunLoopPerTask:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
 
         call_count = 0
 
@@ -874,7 +919,7 @@ class TestRunLoopPerTask:
                 return _ok()
             return _fail("task 2 broke")
 
-        driver.run.side_effect = worker_side_effect
+        driver.run_subagent.side_effect = _route_subagent(worker_side_effect)
         gate = MagicMock()
         gate.request.return_value = True
         fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
@@ -899,7 +944,6 @@ class TestRunLoopPerTask:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
 
         call_count = 0
 
@@ -912,7 +956,7 @@ class TestRunLoopPerTask:
                 return _ok()
             return _fail("task 2 broke")
 
-        driver.run.side_effect = worker_side_effect
+        driver.run_subagent.side_effect = _route_subagent(worker_side_effect)
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -923,7 +967,8 @@ class TestRunLoopPerTask:
             code = run_loop("task")
 
         assert code == 1
-        assert driver.run.call_count == 2
+        worker_calls = [c for c in driver.run_subagent.call_args_list if c.args[0] == WORKER_AGENT]
+        assert len(worker_calls) == 2
 
     def test_successful_run_writes_last_run_state(self, tmp_path, monkeypatch):
         _make_project(tmp_path)
@@ -931,14 +976,13 @@ class TestRunLoopPerTask:
         (tmp_path / "plan.md").write_text(SINGLE_TASK_PLAN)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
 
         def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
             status.write_text(status.read_text() + "- done\n")
             return _ok()
 
-        driver.run.side_effect = worker_side_effect
+        driver.run_subagent.side_effect = _route_subagent(worker_side_effect)
         gate = MagicMock()
         gate.request.return_value = True
         fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
@@ -978,8 +1022,7 @@ class TestRunLoopSensorRetry:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run_subagent.side_effect = _route_subagent(self._worker_ok(tmp_path))
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -992,7 +1035,7 @@ class TestRunLoopSensorRetry:
             code = run_loop("task")
 
         assert code == 0
-        assert driver.run.call_count == 1  # only the worker call, no corrective retry
+        driver.run.assert_not_called()  # no corrective retry
         mock_commit.assert_called_once()
         mock_print.assert_any_call(
             "[metrics] Task 1/1: 2 driver call(s), $0.0000, session None"
@@ -1002,8 +1045,8 @@ class TestRunLoopSensorRetry:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run_subagent.side_effect = _route_subagent(self._worker_ok(tmp_path))
+        driver.run.return_value = _ok()  # corrective call succeeds
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1016,7 +1059,7 @@ class TestRunLoopSensorRetry:
             code = run_loop("task")
 
         assert code == 0
-        assert driver.run.call_count == 2  # initial worker call + one corrective call
+        assert driver.run.call_count == 1  # one corrective call (worker call now goes through run_subagent)
         mock_commit.assert_called_once()
         mock_print.assert_any_call(
             "[metrics] Task 1/1: 3 driver call(s), $0.0000, session None"
@@ -1026,8 +1069,8 @@ class TestRunLoopSensorRetry:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run_subagent.side_effect = _route_subagent(self._worker_ok(tmp_path))
+        driver.run.return_value = _ok()  # corrective call succeeds but never fixes it
         gate = MagicMock()
         gate.request.return_value = True
         fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
@@ -1041,7 +1084,7 @@ class TestRunLoopSensorRetry:
             code = run_loop("task")
 
         assert code == 1
-        assert driver.run.call_count == 1 + SENSOR_RETRY_LIMIT  # worker + every corrective retry
+        assert driver.run.call_count == SENSOR_RETRY_LIMIT  # every corrective retry (worker call now goes through run_subagent)
         mock_commit.assert_not_called()
         assert fake_sandbox.handle is not None
         assert fake_sandbox.handle._keep is True
@@ -1063,8 +1106,7 @@ class TestRunLoopSensorRetry:
         (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run_subagent.side_effect = _route_subagent(self._worker_ok(tmp_path))
         gate = MagicMock()
         gate.request.return_value = True
         fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
@@ -1115,8 +1157,7 @@ class TestRunLoopCodeHealth:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run_subagent.side_effect = _route_subagent(self._worker_ok(tmp_path))
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1138,8 +1179,8 @@ class TestRunLoopCodeHealth:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run_subagent.side_effect = _route_subagent(self._worker_ok(tmp_path))
+        driver.run.return_value = _ok()
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1156,8 +1197,8 @@ class TestRunLoopCodeHealth:
 
         assert code == 0
         mock_commit.assert_called_once()
-        # worker call + one code-health corrective call + review approval
-        assert driver.run.call_count == 2
+        # one code-health corrective call (worker call now goes through run_subagent)
+        assert driver.run.call_count == 1
 
     def test_findings_persist_through_budget_still_commit_and_surface_at_merge(
         self, tmp_path, monkeypatch
@@ -1168,8 +1209,8 @@ class TestRunLoopCodeHealth:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run_subagent.side_effect = _route_subagent(self._worker_ok(tmp_path))
+        driver.run.return_value = _ok()
         gate = MagicMock()
         gate.request.return_value = True
         fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
@@ -1219,8 +1260,7 @@ class TestRunLoopReviewRetry:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run_subagent.side_effect = _route_subagent(self._worker_ok(tmp_path))
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1233,8 +1273,8 @@ class TestRunLoopReviewRetry:
             code = run_loop("task")
 
         assert code == 0
-        assert driver.run_subagent.call_count == 2  # planner + one review call
-        assert driver.run.call_count == 1  # only the worker call, no corrective
+        assert driver.run_subagent.call_count == 3  # planner + worker + one review call
+        driver.run.assert_not_called()  # no corrective
         mock_commit.assert_called_once()
 
     def test_review_requests_changes_once_then_approves(self, tmp_path, monkeypatch):
@@ -1249,11 +1289,13 @@ class TestRunLoopReviewRetry:
                 if review_calls == 1:
                     return _ok(f"{REVIEW_CHANGES_SIGNAL}\nRename `foo` to `bar` in baz.py:12.")
                 return _ok(f"{REVIEW_APPROVED_SIGNAL}\nfoo was renamed to bar as requested.")
+            if agent_name == WORKER_AGENT:
+                return self._worker_ok(tmp_path)(prompt, *args, **kwargs)
             return _ok(PLAN_READY_SIGNAL)
 
         driver = MagicMock()
         driver.run_subagent.side_effect = run_subagent_side_effect
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run.return_value = _ok()
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1267,7 +1309,7 @@ class TestRunLoopReviewRetry:
 
         assert code == 0
         assert review_calls == 2
-        assert driver.run.call_count == 2  # worker + one review-corrective call
+        assert driver.run.call_count == 1  # one review-corrective call (worker call now goes through run_subagent)
         mock_commit.assert_called_once()
 
         content = _read_narrative(tmp_path)
@@ -1282,11 +1324,13 @@ class TestRunLoopReviewRetry:
         def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
             if agent_name == REVIEWER_AGENT:
                 return _ok(f"{REVIEW_CHANGES_SIGNAL}\nStill not right.")
+            if agent_name == WORKER_AGENT:
+                return self._worker_ok(tmp_path)(prompt, *args, **kwargs)
             return _ok(PLAN_READY_SIGNAL)
 
         driver = MagicMock()
         driver.run_subagent.side_effect = run_subagent_side_effect
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run.return_value = _ok()
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1301,7 +1345,7 @@ class TestRunLoopReviewRetry:
         # unlike a sensor failure, exhausting the review retry budget never
         # fails closed — the task still commits with the critique recorded
         assert code == 0
-        assert driver.run.call_count == 1 + REVIEW_RETRY_LIMIT  # worker + every review-corrective
+        assert driver.run.call_count == REVIEW_RETRY_LIMIT  # every review-corrective (worker call now goes through run_subagent)
         mock_commit.assert_called_once()
         assert "[review]" in out
         assert "budget exhausted" in out  # outstanding critique recorded, not discarded
@@ -1318,11 +1362,13 @@ class TestRunLoopReviewRetry:
         def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
             if agent_name == REVIEWER_AGENT:
                 return _ok(f"{REVIEW_CHANGES_SIGNAL}\nFix the thing.")
+            if agent_name == WORKER_AGENT:
+                return self._worker_ok(tmp_path)(prompt, *args, **kwargs)
             return _ok(PLAN_READY_SIGNAL)
 
         driver = MagicMock()
         driver.run_subagent.side_effect = run_subagent_side_effect
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run.return_value = _ok()
         gate = MagicMock()
         gate.request.return_value = True
         fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
@@ -1374,11 +1420,13 @@ class TestRunLoopReviewRetry:
                 if review_calls == 1:
                     return _ok(f"{REVIEW_CHANGES_SIGNAL}\nStill needs a fix.")
                 return _ok(f"{REVIEW_APPROVED_SIGNAL}\nAll good now.")
+            if agent_name == WORKER_AGENT:
+                return self._worker_ok(tmp_path)(prompt, *args, **kwargs)
             return _ok(PLAN_READY_SIGNAL)
 
         driver = MagicMock()
         driver.run_subagent.side_effect = run_subagent_side_effect
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run.return_value = _ok()
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1430,11 +1478,12 @@ class TestRunLoopNarrative:
         def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
             if agent_name == REVIEWER_AGENT:
                 return _ok(f"{REVIEW_APPROVED_SIGNAL}\nConfig matches the plan.")
+            if agent_name == WORKER_AGENT:
+                return worker_side_effect(prompt, *args, **kwargs)
             return _ok(PLAN_READY_SIGNAL)
 
         driver = MagicMock()
         driver.run_subagent.side_effect = run_subagent_side_effect
-        driver.run.side_effect = worker_side_effect
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1465,8 +1514,7 @@ class TestRunLoopNarrative:
             return _ok("Did the work, no marker here.")
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
-        driver.run.side_effect = worker_side_effect
+        driver.run_subagent.side_effect = _route_subagent(worker_side_effect)
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1499,11 +1547,13 @@ class TestRunLoopMetricsSummary:
         def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
             if agent_name == REVIEWER_AGENT:
                 return _ok(REVIEW_APPROVED_SIGNAL, session_id="sess-review")
+            if agent_name == WORKER_AGENT:
+                return worker_side_effect(prompt, *args, **kwargs)
             return _ok(PLAN_READY_SIGNAL)
 
         driver = MagicMock()
         driver.run_subagent.side_effect = run_subagent_side_effect
-        driver.run.side_effect = worker_side_effect
+        driver.run.return_value = _ok()
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1557,11 +1607,12 @@ class TestRunLoopMetricsSummary:
         def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
             if agent_name == REVIEWER_AGENT:
                 return _ok(REVIEW_APPROVED_SIGNAL, session_id="sess-review")
+            if agent_name == WORKER_AGENT:
+                return worker_side_effect(prompt, *args, **kwargs)
             return _ok(PLAN_READY_SIGNAL)
 
         driver = MagicMock()
         driver.run_subagent.side_effect = run_subagent_side_effect
-        driver.run.side_effect = worker_side_effect
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1600,8 +1651,7 @@ class TestRunLoopMainCheckoutLeak:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run_subagent.side_effect = _route_subagent(self._worker_ok(tmp_path))
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1620,8 +1670,7 @@ class TestRunLoopMainCheckoutLeak:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run_subagent.side_effect = _route_subagent(self._worker_ok(tmp_path))
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -1644,8 +1693,7 @@ class TestRunLoopMainCheckoutLeak:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
-        driver.run.return_value = _fail()
+        driver.run_subagent.side_effect = _route_subagent(lambda *a, **k: _fail())
         gate = MagicMock()
         gate.request.return_value = True
         fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
@@ -1668,8 +1716,7 @@ class TestRunLoopMainCheckoutLeak:
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
-        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
-        driver.run.side_effect = self._worker_ok(tmp_path)
+        driver.run_subagent.side_effect = _route_subagent(self._worker_ok(tmp_path))
         gate = MagicMock()
         gate.request.return_value = True
         fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
@@ -1747,23 +1794,24 @@ class TestRunLoopPlannerRetry:
 
         planner_calls = {"n": 0}
 
+        def worker_side_effect(prompt, context_files, cwd=None):
+            status = tmp_path / "memory" / "status.md"
+            status.write_text(status.read_text() + "- done\n")
+            return _ok()
+
         def side_effect(agent_name, prompt, *args, **kwargs):
             if agent_name == REVIEWER_AGENT:
                 return _ok(REVIEW_APPROVED_SIGNAL)
+            if agent_name == WORKER_AGENT:
+                return worker_side_effect(prompt, *args, **kwargs)
             planner_calls["n"] += 1
             if planner_calls["n"] == 1:
                 return _ok("no signal here")
             (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
             return _ok(PLAN_READY_SIGNAL)
 
-        def worker_side_effect(prompt, context_files, cwd=None):
-            status = tmp_path / "memory" / "status.md"
-            status.write_text(status.read_text() + "- done\n")
-            return _ok()
-
         driver = MagicMock()
         driver.run_subagent.side_effect = side_effect
-        driver.run.side_effect = worker_side_effect
         gate = MagicMock()
         gate.request.return_value = True
 
@@ -2083,24 +2131,6 @@ class TestWorkerSummary:
     def test_multiline_trailing_text_keeps_only_first_line(self):
         text = "Done.\nSUMMARY: Fixed the bug.\nThis extra line should be dropped."
         assert _worker_summary(text) == "Fixed the bug."
-
-
-class TestWorkerStaticInstructions:
-    def test_mentions_durable_memory_locations(self):
-        assert "memory/concepts/" in WORKER_STATIC_INSTRUCTIONS
-        assert "AGENTS.md" in WORKER_STATIC_INSTRUCTIONS
-
-    def test_mentions_generated_metadata_guidance(self):
-        assert "generated:" in WORKER_STATIC_INSTRUCTIONS
-
-    def test_summary_rule_is_numbered_five(self):
-        assert "5. End your response with a line starting with 'SUMMARY: '" in (
-            WORKER_STATIC_INSTRUCTIONS
-        )
-
-    def test_rule_count_is_five(self):
-        rule_lines = re.findall(r"^\d+\.", WORKER_STATIC_INSTRUCTIONS, re.MULTILINE)
-        assert len(rule_lines) == 5
 
 
 # ── _build_narrative ─────────────────────────────────────────────────────────
@@ -2514,14 +2544,13 @@ class TestOfferMerge:
         (tmp_path / "plan.md").write_text(SINGLE_TASK_PLAN)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
 
         def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
             status.write_text(status.read_text() + "- done\n")
             return _ok()
 
-        driver.run.side_effect = worker_side_effect
+        driver.run_subagent.side_effect = _route_subagent(worker_side_effect)
         gate = MagicMock()
         gate.request.return_value = True
         fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
@@ -2554,14 +2583,13 @@ class TestOfferMerge:
         (tmp_path / "plan.md").write_text(SINGLE_TASK_PLAN)
 
         driver = MagicMock()
-        driver.run_subagent.side_effect = _plan_then_approve
 
         def worker_side_effect(prompt, context_files, cwd=None):
             status = tmp_path / "memory" / "status.md"
             status.write_text(status.read_text() + "- done\n")
             return _ok()
 
-        driver.run.side_effect = worker_side_effect
+        driver.run_subagent.side_effect = _route_subagent(worker_side_effect)
         gate = MagicMock()
         gate.request.return_value = True
         fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")

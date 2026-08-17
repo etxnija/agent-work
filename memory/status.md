@@ -889,3 +889,8 @@ worktree-isolation root cause is also still open if it's worth another look.
 
 
 **Run metrics:** 16 driver call(s), $4.5956, session adaf47b9-dc86-4a64-90e1-ccbc6139800b
+
+
+## 2026-08-17 — plan rejected
+Task: make archteture diagram
+Plan written but not approved by human.

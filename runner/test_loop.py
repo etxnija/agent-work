@@ -1,6 +1,7 @@
 """Tests for runner/loop.py."""
 
 import json
+import logging
 import os
 import subprocess
 from contextlib import contextmanager
@@ -22,11 +23,10 @@ from runner.loop import (
     REVIEWER_AGENT,
     SENSOR_RETRY_LIMIT,
     WORKER_AGENT,
-    _append_narrative_outcome,
     _branch_commits,
-    _build_narrative,
     _commit_status_update,
     _commit_task,
+    _log_handlers,
     _main_checkout_dirty_paths,
     _offer_merge,
     _parse_task_concepts,
@@ -45,8 +45,10 @@ from runner.loop import (
     _update_coverage_baseline,
     _worker_summary,
     _write_last_run_state,
-    _write_narrative,
     run_loop,
+)
+from runner.loop import (
+    logger as loop_logger,
 )
 from runner.sandbox.base import WorkspaceHandle
 from runner.sandbox.noop import NoopSandbox
@@ -72,13 +74,6 @@ def _make_project(tmp_path: Path) -> Path:
     (tmp_path / "AGENTS.md").write_text("# AGENTS")
     (tmp_path / "memory" / "status.md").write_text("# Status\n")
     return tmp_path
-
-
-def _read_narrative(tmp_path: Path) -> str:
-    """Read the single run-*.md narrative file run_loop wrote under logs/."""
-    logs = list((tmp_path / "logs").glob("run-*.md"))
-    assert len(logs) == 1, f"expected exactly one narrative file, found {logs}"
-    return logs[0].read_text()
 
 
 def _ok(text="", session_id=None) -> AgentResult:
@@ -205,6 +200,73 @@ class TestParseTasks:
         plan.write_text(MINIMAL_PLAN)
         for task in _parse_tasks(str(plan)):
             assert task == task.strip()
+
+
+# ── _log_handlers ────────────────────────────────────────────────────────────
+
+class TestLogHandlers:
+    def test_attaches_and_detaches_handlers(self, tmp_path):
+        log_path = tmp_path / "run.log"
+        before = set(loop_logger.handlers)
+
+        with _log_handlers(log_path):
+            during = set(loop_logger.handlers) - before
+            assert len(during) == 2
+            kinds = {type(h) for h in during}
+            assert kinds == {logging.StreamHandler, logging.FileHandler}
+            loop_logger.info("hello from the loop")
+
+        assert set(loop_logger.handlers) == before
+        assert "hello from the loop" in log_path.read_text()
+
+    def test_removes_handlers_on_exception(self, tmp_path):
+        log_path = tmp_path / "run.log"
+        before = set(loop_logger.handlers)
+
+        with pytest.raises(ValueError), _log_handlers(log_path):
+            raise ValueError("boom")
+
+        assert set(loop_logger.handlers) == before
+
+    def test_console_level_gates_debug_but_not_info(self, tmp_path, caplog):
+        log_path = tmp_path / "run.log"
+        with _log_handlers(log_path):
+            caplog.set_level(logging.INFO, logger="agent_loop")
+            loop_logger.debug("debug detail")
+            assert "debug detail" not in caplog.text
+
+            caplog.set_level(logging.DEBUG, logger="agent_loop")
+            loop_logger.debug("debug detail")
+            assert "debug detail" in caplog.text
+
+    def test_file_handler_receives_debug_with_timestamp(self, tmp_path):
+        log_path = tmp_path / "run.log"
+        with _log_handlers(log_path):
+            loop_logger.debug("debug detail")
+
+        content = log_path.read_text()
+        line = next(l for l in content.splitlines() if "debug detail" in l)
+        assert line != "debug detail"  # a timestamp prefix was added
+        assert line.split(" ", 1)[0][:4].isdigit()  # prefix starts with a year
+
+    def test_repeated_run_loop_calls_do_not_accumulate_handlers(self, tmp_path, monkeypatch):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        gate = MagicMock()
+        gate.request.return_value = False  # stop right after plan validation
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
+            assert len(loop_logger.handlers) == 0
+            run_loop("task")
+            assert len(loop_logger.handlers) == 0
+            run_loop("task")
+            assert len(loop_logger.handlers) == 0
 
 
 # ── _plan_invalid_reason ─────────────────────────────────────────────────────
@@ -623,8 +685,7 @@ class TestRunLoopPlannerFailures:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("do something")
 
         assert code == expected_code
@@ -646,8 +707,30 @@ class TestRunLoopNoTasks:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
+            code = run_loop("task")
+
+        assert code == 1
+        driver.run.assert_not_called()
+
+    def test_returns_1_when_tasks_removed_during_approval(self, tmp_path, monkeypatch):
+        """Human can edit plan.md at the approval gate; re-parse after approval must catch it."""
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
+
+        def _strip_tasks_and_approve(_plan_file):
+            (tmp_path / "plan.md").write_text("# Plan\n\n## Context\nno tasks.\n")
+            return True
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
+        gate = MagicMock()
+        gate.request.side_effect = _strip_tasks_and_approve
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("task")
 
         assert code == 1
@@ -669,8 +752,7 @@ class TestRunLoopGateRejection:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("task")
 
         assert code == 2
@@ -689,8 +771,7 @@ class TestRunLoopGateRejection:
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
              patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("runner.loop._commit_status_update") as commit_status_update, \
-             patch("builtins.print"):
+             patch("runner.loop._commit_status_update") as commit_status_update:
             run_loop("task")
 
         commit_status_update.assert_called_once_with(
@@ -716,8 +797,7 @@ class TestRunLoopGateRejection:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("task")
 
         assert code == 2
@@ -752,8 +832,7 @@ class TestRunLoopPerTask:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("task")
 
         assert code == 0
@@ -783,8 +862,7 @@ class TestRunLoopPerTask:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("task")
 
         assert code == 0
@@ -814,8 +892,7 @@ class TestRunLoopPerTask:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             run_loop("task")
 
         worker_calls = [c for c in driver.run_subagent.call_args_list if c.args[0] == WORKER_AGENT]
@@ -843,8 +920,7 @@ class TestRunLoopPerTask:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             run_loop("task")
 
         # NoopSandbox yields project_root as the workspace path
@@ -864,15 +940,14 @@ class TestRunLoopPerTask:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("task")
 
         assert code == 1
         worker_calls = [c for c in driver.run_subagent.call_args_list if c.args[0] == WORKER_AGENT]
         assert len(worker_calls) == 1  # stopped after first failure
 
-    def test_worker_hard_failure_preserves_branch(self, tmp_path, monkeypatch):
+    def test_worker_hard_failure_preserves_branch(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
@@ -884,23 +959,22 @@ class TestRunLoopPerTask:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
-             patch("builtins.print") as mock_print:
+             patch("runner.loop.get_sandbox", return_value=fake_sandbox):
             code = run_loop("task")
 
         assert code == 1
         assert fake_sandbox.handle is not None
         assert fake_sandbox.handle._keep is True
-        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
         assert any(
-            "agent/fake-branch" in line and "0 completed task(s)" in line for line in printed
+            "agent/fake-branch" in line and "0 completed task(s)" in line
+            for line in caplog.messages
         )
         state_file = tmp_path / ".agent-last-run.json"
         assert state_file.exists()
         assert json.loads(state_file.read_text())["branch"] == "agent/fake-branch"
 
     def test_second_task_worker_failure_preserves_first_tasks_commit(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, caplog
     ):
         """Two-task plan: task 1 completes, task 2's worker call fails —
         the branch is preserved and the recovery message names 1 completed task."""
@@ -927,16 +1001,15 @@ class TestRunLoopPerTask:
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
              patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
-             patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print") as mock_print:
+             patch("runner.loop._commit_task") as mock_commit:
             code = run_loop("task")
 
         assert code == 1
         assert fake_sandbox.handle is not None
         assert fake_sandbox.handle._keep is True
-        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
         assert any(
-            "agent/fake-branch" in line and "1 completed task(s)" in line for line in printed
+            "agent/fake-branch" in line and "1 completed task(s)" in line
+            for line in caplog.messages
         )
         mock_commit.assert_called_once()
 
@@ -962,8 +1035,7 @@ class TestRunLoopPerTask:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("task")
 
         assert code == 1
@@ -991,8 +1063,7 @@ class TestRunLoopPerTask:
              patch("runner.loop.get_gate", return_value=gate), \
              patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
              patch("runner.loop._commit_task"), \
-             patch("runner.loop._offer_merge", return_value="merged"), \
-             patch("builtins.print"):
+             patch("runner.loop._offer_merge", return_value="merged"):
             code = run_loop("task")
 
         assert code == 0
@@ -1018,7 +1089,7 @@ class TestRunLoopSensorRetry:
             return _ok()
         return worker_side_effect
 
-    def test_sensors_pass_first_try_commits_without_retry(self, tmp_path, monkeypatch):
+    def test_sensors_pass_first_try_commits_without_retry(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
@@ -1030,18 +1101,17 @@ class TestRunLoopSensorRetry:
              patch("runner.loop.get_gate", return_value=gate), \
              patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("runner.loop._run_sensors", return_value=[]), \
-             patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print") as mock_print:
+             patch("runner.loop._commit_task") as mock_commit:
             code = run_loop("task")
 
         assert code == 0
         driver.run.assert_not_called()  # no corrective retry
         mock_commit.assert_called_once()
-        mock_print.assert_any_call(
-            "[metrics] Task 1/1: 2 driver call(s), $0.0000, session None"
+        assert (
+            "[metrics] Task 1/1: 2 driver call(s), $0.0000, session None" in caplog.messages
         )  # worker + review approval
 
-    def test_sensors_fail_once_then_pass_retries_and_commits(self, tmp_path, monkeypatch):
+    def test_sensors_fail_once_then_pass_retries_and_commits(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
@@ -1054,18 +1124,17 @@ class TestRunLoopSensorRetry:
              patch("runner.loop.get_gate", return_value=gate), \
              patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("runner.loop._run_sensors", side_effect=[[("lint.sh", "bad")], []]), \
-             patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print") as mock_print:
+             patch("runner.loop._commit_task") as mock_commit:
             code = run_loop("task")
 
         assert code == 0
         assert driver.run.call_count == 1  # one corrective call (worker call now goes through run_subagent)
         mock_commit.assert_called_once()
-        mock_print.assert_any_call(
-            "[metrics] Task 1/1: 3 driver call(s), $0.0000, session None"
+        assert (
+            "[metrics] Task 1/1: 3 driver call(s), $0.0000, session None" in caplog.messages
         )  # worker + corrective + review approval
 
-    def test_sensors_fail_every_retry_fails_closed_without_commit(self, tmp_path, monkeypatch):
+    def test_sensors_fail_every_retry_fails_closed_without_commit(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
@@ -1079,8 +1148,7 @@ class TestRunLoopSensorRetry:
              patch("runner.loop.get_gate", return_value=gate), \
              patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
              patch("runner.loop._run_sensors", return_value=[("lint.sh", "still bad")]), \
-             patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print") as mock_print:
+             patch("runner.loop._commit_task") as mock_commit:
             code = run_loop("task")
 
         assert code == 1
@@ -1088,16 +1156,16 @@ class TestRunLoopSensorRetry:
         mock_commit.assert_not_called()
         assert fake_sandbox.handle is not None
         assert fake_sandbox.handle._keep is True
-        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
         assert any(
-            "agent/fake-branch" in line and "0 completed task(s)" in line for line in printed
+            "agent/fake-branch" in line and "0 completed task(s)" in line
+            for line in caplog.messages
         )
         state_file = tmp_path / ".agent-last-run.json"
         assert state_file.exists()
         assert json.loads(state_file.read_text())["branch"] == "agent/fake-branch"
 
     def test_second_task_sensor_exhaustion_preserves_first_tasks_commit(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, caplog
     ):
         """Two-task plan: task 1 completes, task 2's sensors fail every retry —
         the branch is preserved and the recovery message names 1 completed task."""
@@ -1124,17 +1192,16 @@ class TestRunLoopSensorRetry:
              patch("runner.loop.get_gate", return_value=gate), \
              patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
              patch("runner.loop._run_sensors", side_effect=sensors_side_effect), \
-             patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print") as mock_print:
+             patch("runner.loop._commit_task") as mock_commit:
             code = run_loop("task")
 
         assert code == 1
         mock_commit.assert_called_once()  # task 1's commit went through
         assert fake_sandbox.handle is not None
         assert fake_sandbox.handle._keep is True
-        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
         assert any(
-            "agent/fake-branch" in line and "1 completed task(s)" in line for line in printed
+            "agent/fake-branch" in line and "1 completed task(s)" in line
+            for line in caplog.messages
         )
 
 
@@ -1153,7 +1220,7 @@ class TestRunLoopCodeHealth:
             return _ok()
         return worker_side_effect
 
-    def test_clean_on_first_check_commits_without_finding_message(self, tmp_path, monkeypatch):
+    def test_clean_on_first_check_commits_without_finding_message(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
@@ -1166,14 +1233,12 @@ class TestRunLoopCodeHealth:
              patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("runner.loop._run_sensors", return_value=[]), \
              patch("runner.loop.check_code_health", return_value=[]), \
-             patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print") as mock_print:
+             patch("runner.loop._commit_task") as mock_commit:
             code = run_loop("task")
 
         assert code == 0
         mock_commit.assert_called_once()
-        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
-        assert not any("[code-health]" in line for line in printed)
+        assert "[code-health]" not in caplog.text
 
     def test_findings_fixed_after_one_corrective_call_commits(self, tmp_path, monkeypatch):
         self._setup(tmp_path, monkeypatch)
@@ -1191,8 +1256,7 @@ class TestRunLoopCodeHealth:
              patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("runner.loop._run_sensors", return_value=[]), \
              patch("runner.loop.check_code_health", side_effect=[findings, []]), \
-             patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print"):
+             patch("runner.loop._commit_task") as mock_commit:
             code = run_loop("task")
 
         assert code == 0
@@ -1201,7 +1265,7 @@ class TestRunLoopCodeHealth:
         assert driver.run.call_count == 1
 
     def test_findings_persist_through_budget_still_commit_and_surface_at_merge(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, caplog
     ):
         """Code-health findings that survive every corrective retry do NOT fail
         closed (unlike sensors) — the commit proceeds and the remaining findings
@@ -1224,9 +1288,7 @@ class TestRunLoopCodeHealth:
              patch("runner.loop.check_code_health", return_value=findings), \
              patch("runner.loop._commit_task") as mock_commit, \
              patch("runner.loop._offer_merge", return_value="merged") as mock_offer, \
-             patch("runner.loop._append_narrative_outcome"), \
-             patch("runner.loop._update_coverage_baseline"), \
-             patch("builtins.print") as mock_print:
+             patch("runner.loop._update_coverage_baseline"):
             code = run_loop("task")
 
         assert code == 0
@@ -1234,10 +1296,9 @@ class TestRunLoopCodeHealth:
         mock_offer.assert_called_once()
         _, kwargs = mock_offer.call_args
         assert kwargs["code_health_issues"] == {1: findings}
-        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
         assert any(
             "[code-health]" in line and f"attempt {CODE_HEALTH_RETRY_LIMIT}/{CODE_HEALTH_RETRY_LIMIT}" in line
-            for line in printed
+            for line in caplog.messages
         )
 
 
@@ -1268,8 +1329,7 @@ class TestRunLoopReviewRetry:
              patch("runner.loop.get_gate", return_value=gate), \
              patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("runner.loop._run_sensors", return_value=[]), \
-             patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print"):
+             patch("runner.loop._commit_task") as mock_commit:
             code = run_loop("task")
 
         assert code == 0
@@ -1303,8 +1363,7 @@ class TestRunLoopReviewRetry:
              patch("runner.loop.get_gate", return_value=gate), \
              patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("runner.loop._run_sensors", return_value=[]), \
-             patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print"):
+             patch("runner.loop._commit_task") as mock_commit:
             code = run_loop("task")
 
         assert code == 0
@@ -1312,12 +1371,8 @@ class TestRunLoopReviewRetry:
         assert driver.run.call_count == 1  # one review-corrective call (worker call now goes through run_subagent)
         mock_commit.assert_called_once()
 
-        content = _read_narrative(tmp_path)
-        assert "Review: APPROVED — foo was renamed to bar as requested." in content
-        assert "Retries: 1 review round" in content  # no sensor retries in this run
-
     def test_review_requests_changes_every_retry_does_not_fail_closed(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch, caplog
     ):
         self._setup(tmp_path, monkeypatch)
 
@@ -1341,7 +1396,7 @@ class TestRunLoopReviewRetry:
              patch("runner.loop._commit_task") as mock_commit:
             code = run_loop("task")
 
-        out = capsys.readouterr().out
+        out = caplog.text
         # unlike a sensor failure, exhausting the review retry budget never
         # fails closed — the task still commits with the critique recorded
         assert code == 0
@@ -1350,12 +1405,8 @@ class TestRunLoopReviewRetry:
         assert "[review]" in out
         assert "budget exhausted" in out  # outstanding critique recorded, not discarded
 
-        content = _read_narrative(tmp_path)
-        assert "Review: CHANGES REQUESTED (unresolved) — Still not right." in content
-        assert f"Retries: {REVIEW_RETRY_LIMIT} review rounds" in content
-
     def test_sensor_regression_after_review_corrective_still_fails_closed(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, caplog
     ):
         self._setup(tmp_path, monkeypatch)
 
@@ -1386,28 +1437,27 @@ class TestRunLoopReviewRetry:
              patch("runner.loop.get_gate", return_value=gate), \
              patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
              patch("runner.loop._run_sensors", side_effect=sensors_side_effect), \
-             patch("runner.loop._commit_task") as mock_commit, \
-             patch("builtins.print") as mock_print:
+             patch("runner.loop._commit_task") as mock_commit:
             code = run_loop("task")
 
         assert code == 1
         mock_commit.assert_not_called()
         assert fake_sandbox.handle is not None
         assert fake_sandbox.handle._keep is True
-        printed = [call.args[0] for call in mock_print.call_args_list if call.args]
         assert any(
-            "agent/fake-branch" in line and "0 completed task(s)" in line for line in printed
+            "agent/fake-branch" in line and "0 completed task(s)" in line
+            for line in caplog.messages
         )
 
     def test_sensor_retries_accumulate_across_initial_and_review_corrective_calls(
         self, tmp_path, monkeypatch
     ):
         """
-        sensor_retry_count is accumulated across the post-worker call site
-        (runner/loop.py's first _run_sensors_with_retry call) and the
-        review-corrective-loop call site — this drives one fail-then-pass
-        cycle through each and checks the narrative sums them, not just
-        records the last one.
+        Sensor retries are tracked across two call sites: the post-worker
+        _run_sensors_with_retry call and the review-corrective-loop call.
+        This drives one fail-then-pass cycle through each and confirms both
+        sites are actually exercised (all four side-effect values consumed)
+        and the task still reaches a successful, approved commit.
         """
         self._setup(tmp_path, monkeypatch)
 
@@ -1439,102 +1489,20 @@ class TestRunLoopReviewRetry:
                      [("lint.sh", "bad")], [],  # site A: fail once then pass
                      [("lint.sh", "bad")], [],  # site B (inside review loop): fail once then pass
                  ],
-             ), \
-             patch("runner.loop._commit_task"), \
-             patch("builtins.print"):
+             ) as mock_sensors, \
+             patch("runner.loop._commit_task") as mock_commit:
             code = run_loop("task")
 
         assert code == 0
-        content = _read_narrative(tmp_path)
-        assert "Retries: 2 sensor retries, 1 review round" in content
-        assert "Review: APPROVED — All good now." in content
-
-
-# ── Run narrative wiring ─────────────────────────────────────────────────────
-
-class TestRunLoopNarrative:
-    """
-    run_loop() feeds _build_narrative()/_write_narrative() from task_narratives
-    it assembles internally; _build_narrative and _write_narrative are already
-    unit-tested in isolation (TestBuildNarrative, TestWriteNarrative) — these
-    tests prove the real loop populates that data correctly end to end.
-    """
-
-    def _setup(self, tmp_path, monkeypatch):
-        _make_project(tmp_path)
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / "plan.md").write_text(SINGLE_TASK_PLAN)
-
-    def test_narrative_file_reflects_worker_summary_and_review_verdict(
-        self, tmp_path, monkeypatch
-    ):
-        self._setup(tmp_path, monkeypatch)
-
-        def worker_side_effect(prompt, context_files, cwd=None):
-            status = tmp_path / "memory" / "status.md"
-            status.write_text(status.read_text() + "- done\n")
-            return _ok("Did the work.\nSUMMARY: Added the config file because tests needed it.")
-
-        def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
-            if agent_name == REVIEWER_AGENT:
-                return _ok(f"{REVIEW_APPROVED_SIGNAL}\nConfig matches the plan.")
-            if agent_name == WORKER_AGENT:
-                return worker_side_effect(prompt, *args, **kwargs)
-            return _ok(PLAN_READY_SIGNAL)
-
-        driver = MagicMock()
-        driver.run_subagent.side_effect = run_subagent_side_effect
-        gate = MagicMock()
-        gate.request.return_value = True
-
-        with patch("runner.loop.get_driver", return_value=driver), \
-             patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("runner.loop._run_sensors", return_value=[]), \
-             patch("runner.loop._commit_task"), \
-             patch("builtins.print"):
-            code = run_loop("build the thing")
-
-        assert code == 0
-        content = _read_narrative(tmp_path)
-        assert content.startswith("# Run narrative: build the thing\n")
-        assert "## Task 1:" in content
-        assert "Add config" in content  # from SINGLE_TASK_PLAN's task title
-        assert "Summary: Added the config file because tests needed it." in content
-        assert "Review: APPROVED — Config matches the plan." in content
-        assert "Retries:" not in content  # zero sensor and review retries → line omitted
-        assert "## Outcome" not in content  # NoopSandbox has no branch → _offer_merge never runs
-
-    def test_narrative_records_placeholder_when_worker_omits_summary(self, tmp_path, monkeypatch):
-        self._setup(tmp_path, monkeypatch)
-
-        def worker_side_effect(prompt, context_files, cwd=None):
-            status = tmp_path / "memory" / "status.md"
-            status.write_text(status.read_text() + "- done\n")
-            return _ok("Did the work, no marker here.")
-
-        driver = MagicMock()
-        driver.run_subagent.side_effect = _route_subagent(worker_side_effect)
-        gate = MagicMock()
-        gate.request.return_value = True
-
-        with patch("runner.loop.get_driver", return_value=driver), \
-             patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("runner.loop._run_sensors", return_value=[]), \
-             patch("runner.loop._commit_task"), \
-             patch("builtins.print"):
-            code = run_loop("task")
-
-        assert code == 0
-        content = _read_narrative(tmp_path)
-        assert "Summary: (worker did not provide a summary)" in content
+        assert mock_sensors.call_count == 4  # both retry sites consumed all four side effects
+        assert review_calls == 2
+        mock_commit.assert_called_once()
 
 
 # ── Run-level metrics summary ────────────────────────────────────────────────
 
 class TestRunLoopMetricsSummary:
-    def test_run_total_printed_and_appended_to_status(self, tmp_path, monkeypatch):
+    def test_run_total_printed_and_appended_to_status(self, tmp_path, monkeypatch, caplog):
         _make_project(tmp_path)
         monkeypatch.chdir(tmp_path)
         (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
@@ -1564,8 +1532,7 @@ class TestRunLoopMetricsSummary:
                  "runner.loop._run_sensors",
                  side_effect=[[], [("lint.sh", "bad")], []],
              ), \
-             patch("runner.loop._commit_task"), \
-             patch("builtins.print") as mock_print:
+             patch("runner.loop._commit_task"):
             code = run_loop("task")
 
         assert code == 0
@@ -1574,15 +1541,9 @@ class TestRunLoopMetricsSummary:
         #   + task 2 (worker + corrective + review approval, one sensor retry = 3 calls)
         # session id asserted as a real value (not None) so this fails if session
         # tracking gets wired to the wrong source.
-        mock_print.assert_any_call(
-            "[metrics] Task 1/2: 2 driver call(s), $0.0000, session sess-review"
-        )
-        mock_print.assert_any_call(
-            "[metrics] Task 2/2: 3 driver call(s), $0.0000, session sess-review"
-        )
-        mock_print.assert_any_call(
-            "[metrics] Run total: 6 driver call(s), $0.0000, session sess-review"
-        )
+        assert "[metrics] Task 1/2: 2 driver call(s), $0.0000, session sess-review" in caplog.messages
+        assert "[metrics] Task 2/2: 3 driver call(s), $0.0000, session sess-review" in caplog.messages
+        assert "[metrics] Run total: 6 driver call(s), $0.0000, session sess-review" in caplog.messages
 
         status_text = (tmp_path / "memory" / "status.md").read_text()
         assert "**Run metrics:** 6 driver call(s), $0.0000, session sess-review" in status_text
@@ -1620,8 +1581,7 @@ class TestRunLoopMetricsSummary:
              patch("runner.loop.get_gate", return_value=gate), \
              patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
              patch("runner.loop._run_sensors", return_value=[]), \
-             patch("runner.loop._commit_task"), \
-             patch("builtins.print"):
+             patch("runner.loop._commit_task"):
             code = run_loop("task")
 
         assert code == 0
@@ -1647,7 +1607,7 @@ class TestRunLoopMainCheckoutLeak:
             return _ok()
         return worker_side_effect
 
-    def test_no_leak_prints_no_warning(self, tmp_path, monkeypatch, capsys):
+    def test_no_leak_prints_no_warning(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
@@ -1663,10 +1623,9 @@ class TestRunLoopMainCheckoutLeak:
             code = run_loop("task")
 
         assert code == 0
-        out = capsys.readouterr().out
-        assert "wrote outside its sandboxed worktree" not in out
+        assert "wrote outside its sandboxed worktree" not in caplog.text
 
-    def test_leak_prints_warning_but_does_not_stop_the_loop(self, tmp_path, monkeypatch, capsys):
+    def test_leak_prints_warning_but_does_not_stop_the_loop(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
@@ -1685,11 +1644,11 @@ class TestRunLoopMainCheckoutLeak:
             code = run_loop("task")
 
         assert code == 0  # warns, does not fail the task
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "wrote outside its sandboxed worktree" in out
         assert "runner/loop.py" in out
 
-    def test_worker_failure_after_leak_still_prints_warning(self, tmp_path, monkeypatch, capsys):
+    def test_worker_failure_after_leak_still_prints_warning(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
@@ -1708,11 +1667,11 @@ class TestRunLoopMainCheckoutLeak:
             code = run_loop("task")
 
         assert code == 1
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "wrote outside its sandboxed worktree" in out
         assert "leaked.py" in out
 
-    def test_sensor_failure_after_leak_still_prints_warning(self, tmp_path, monkeypatch, capsys):
+    def test_sensor_failure_after_leak_still_prints_warning(self, tmp_path, monkeypatch, caplog):
         self._setup(tmp_path, monkeypatch)
 
         driver = MagicMock()
@@ -1732,7 +1691,7 @@ class TestRunLoopMainCheckoutLeak:
             code = run_loop("task")
 
         assert code == 1
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "wrote outside its sandboxed worktree" in out
         assert "leaked.py" in out
 
@@ -1740,7 +1699,7 @@ class TestRunLoopMainCheckoutLeak:
 # ── Status.md check per task ──────────────────────────────────────────────────
 
 class TestRunLoopStatusCheckPerTask:
-    def test_warns_per_task_when_status_not_updated(self, tmp_path, monkeypatch, capsys):
+    def test_warns_per_task_when_status_not_updated(self, tmp_path, monkeypatch, caplog):
         _make_project(tmp_path)
         monkeypatch.chdir(tmp_path)
         (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
@@ -1757,8 +1716,8 @@ class TestRunLoopStatusCheckPerTask:
              patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             run_loop("task")
 
-        out = capsys.readouterr().out
-        assert out.lower().count("warning") == 2  # one warning per task
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 2  # one warning per task
 
 
 # ── Planner retry loop ──────────────────────────────────────────────────────
@@ -1780,8 +1739,7 @@ class TestRunLoopPlannerRetry:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             run_loop("task")
 
         assert driver.run_subagent.call_count == 1
@@ -1817,8 +1775,7 @@ class TestRunLoopPlannerRetry:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("task")
 
         assert planner_calls["n"] == 2
@@ -1836,8 +1793,7 @@ class TestRunLoopPlannerRetry:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("task")
 
         assert driver.run_subagent.call_count == 1 + PLANNER_RETRY_LIMIT
@@ -1855,8 +1811,7 @@ class TestRunLoopPlannerRetry:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("task")
 
         assert driver.run_subagent.call_count == 2
@@ -1883,8 +1838,7 @@ class TestRunLoopPlannerRetry:
 
         with patch("runner.loop.get_driver", return_value=driver), \
              patch("runner.loop.get_gate", return_value=gate), \
-             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
-             patch("builtins.print"):
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()):
             code = run_loop("task")
 
         assert driver.run_subagent.call_count == 2
@@ -1919,24 +1873,41 @@ class TestCommitTask:
         subprocess.run(["git", "commit", "--allow-empty", "-m", "init"],
                        cwd=path, check=True, capture_output=True, env=env)
 
-    def test_commits_new_file(self, tmp_path, capsys):
+    def test_commits_new_file(self, tmp_path, caplog):
         self._init_repo(tmp_path)
         (tmp_path / "new.txt").write_text("hello")
         _commit_task(1, "Add greeting", tmp_path)
         log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
                              capture_output=True, text=True, check=False).stdout
         assert "Task 1: Add greeting" in log
-        assert "committed" in capsys.readouterr().out.lower()
+        assert "committed" in caplog.text.lower()
 
-    def test_nothing_to_commit_skips_silently(self, tmp_path, capsys):
+    def test_nothing_to_commit_skips_silently(self, tmp_path, caplog):
         self._init_repo(tmp_path)
         _commit_task(1, "No changes", tmp_path)
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "nothing" in out.lower()
         # still only the init commit
         log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
                              capture_output=True, text=True, check=False).stdout
         assert log.strip().count("\n") == 0  # single commit
+
+    def test_commit_failure_logs_warning(self, tmp_path, caplog):
+        self._init_repo(tmp_path)
+        (tmp_path / "new.txt").write_text("hello")
+
+        real_run = subprocess.run
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[:2] == ["git", "commit"]:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="commit hook rejected")
+            return real_run(cmd, *args, **kwargs)
+
+        with patch("runner.loop.subprocess.run", side_effect=fake_run):
+            _commit_task(1, "Add greeting", tmp_path)
+
+        assert "commit failed" in caplog.text.lower()
+        assert "commit hook rejected" in caplog.text
 
 
 class TestCommitStatusUpdate:
@@ -1968,7 +1939,7 @@ class TestCommitStatusUpdate:
         ).stdout
         assert [line for line in files.splitlines() if line] == ["memory/status.md"]
 
-    def test_nothing_changed_does_not_crash(self, tmp_path, capsys):
+    def test_nothing_changed_does_not_crash(self, tmp_path, caplog):
         self._init_repo(tmp_path)
         memory_dir = tmp_path / "memory"
         memory_dir.mkdir()
@@ -1983,7 +1954,7 @@ class TestCommitStatusUpdate:
         # status.md is already committed and unchanged, so there is nothing to commit.
         _commit_status_update("test message", tmp_path)
 
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "[status] Commit failed" in out
         log = subprocess.run(["git", "log", "--oneline"], cwd=tmp_path,
                              capture_output=True, text=True, check=False).stdout
@@ -2133,129 +2104,6 @@ class TestWorkerSummary:
         assert _worker_summary(text) == "Fixed the bug."
 
 
-# ── _build_narrative ─────────────────────────────────────────────────────────
-
-class TestBuildNarrative:
-    def test_empty_task_narratives_is_heading_only(self):
-        content = _build_narrative("Add feature X", [])
-        assert content == "# Run narrative: Add feature X\n"
-
-    def test_single_task_with_all_fields_populated(self):
-        entry = {
-            "num": 1,
-            "title": "Add the foo helper",
-            "summary": "Added the foo helper because bar needed it.",
-            "review_approved": True,
-            "review_reasoning": "The diff matches the plan.",
-            "code_health_findings": [],
-            "sensor_retries": 1,
-            "review_retries": 1,
-            "code_health_retries": 0,
-        }
-        content = _build_narrative("Add feature X", [entry])
-        assert content == (
-            "# Run narrative: Add feature X\n"
-            "\n"
-            "## Task 1: Add the foo helper\n"
-            "Summary: Added the foo helper because bar needed it.\n"
-            "Review: APPROVED — The diff matches the plan.\n"
-            "Code health: clean\n"
-            "Retries: 1 sensor retry, 1 review round\n"
-        )
-
-    def test_zero_retries_omits_retry_line(self):
-        entry = {
-            "num": 2,
-            "title": "Second task",
-            "summary": "Did the thing.",
-            "review_approved": False,
-            "review_reasoning": "Needs more tests.",
-            "code_health_findings": [],
-            "sensor_retries": 0,
-            "review_retries": 0,
-            "code_health_retries": 0,
-        }
-        content = _build_narrative("Add feature X", [entry])
-        assert content == (
-            "# Run narrative: Add feature X\n"
-            "\n"
-            "## Task 2: Second task\n"
-            "Summary: Did the thing.\n"
-            "Review: CHANGES REQUESTED (unresolved) — Needs more tests.\n"
-            "Code health: clean\n"
-        )
-
-    def test_empty_summary_renders_placeholder(self):
-        entry = {
-            "num": 3,
-            "title": "Third task",
-            "summary": "",
-            "review_approved": True,
-            "review_reasoning": "Looks fine.",
-            "code_health_findings": [],
-            "sensor_retries": 0,
-            "review_retries": 0,
-            "code_health_retries": 0,
-        }
-        content = _build_narrative("Add feature X", [entry])
-        assert "Summary: (worker did not provide a summary)\n" in content
-
-    def test_code_health_findings_listed_and_included_in_retries(self):
-        entry = {
-            "num": 4,
-            "title": "Fourth task",
-            "summary": "Refactored the parser.",
-            "review_approved": True,
-            "review_reasoning": "Looks fine.",
-            "code_health_findings": ["foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50"],
-            "sensor_retries": 0,
-            "review_retries": 0,
-            "code_health_retries": 2,
-        }
-        content = _build_narrative("Add feature X", [entry])
-        assert content == (
-            "# Run narrative: Add feature X\n"
-            "\n"
-            "## Task 4: Fourth task\n"
-            "Summary: Refactored the parser.\n"
-            "Review: APPROVED — Looks fine.\n"
-            "Code health: 1 finding(s) remaining\n"
-            "  - foo.py: bar (lines 1-60) — NLOC 60 exceeds threshold 50\n"
-            "Retries: 2 code-health retries\n"
-        )
-
-
-class TestWriteNarrative:
-    def test_creates_logs_dir_when_absent(self, tmp_path):
-        assert not (tmp_path / "logs").exists()
-        _write_narrative(tmp_path, "20260804-131838", "content")
-        assert (tmp_path / "logs").is_dir()
-
-    def test_writes_expected_file_content_and_returns_path(self, tmp_path):
-        path = _write_narrative(tmp_path, "20260804-131838", "# Run narrative\n")
-        assert path == tmp_path / "logs" / "run-20260804-131838.md"
-        assert path.read_text() == "# Run narrative\n"
-
-    def test_second_call_with_different_timestamp_does_not_clobber_first(self, tmp_path):
-        first = _write_narrative(tmp_path, "20260804-131838", "first content\n")
-        second = _write_narrative(tmp_path, "20260804-140000", "second content\n")
-        assert first != second
-        assert first.read_text() == "first content\n"
-        assert second.read_text() == "second content\n"
-
-
-class TestAppendNarrativeOutcome:
-    def test_appends_without_truncating_prior_content(self, tmp_path):
-        path = tmp_path / "run-20260804-131838.md"
-        path.write_text("# Run narrative\n\n## Task 1: add feature\nSummary: did the thing.\n")
-
-        _append_narrative_outcome(path, "merged")
-
-        content = path.read_text()
-        assert content.startswith("# Run narrative\n\n## Task 1: add feature\nSummary: did the thing.\n")
-        assert content.endswith("\n## Outcome\nmerged\n")
-
-
 class TestBranchCommits:
     def test_returns_commits_ahead_of_head(self, tmp_path):
         _init_repo(tmp_path)
@@ -2361,7 +2209,7 @@ class TestUpdateCoverageBaseline:
 
 
 class TestOfferMerge:
-    def test_no_commits_prints_warning_and_returns(self, tmp_path, capsys, monkeypatch):
+    def test_no_commits_prints_warning_and_returns(self, tmp_path, caplog, monkeypatch):
         monkeypatch.delenv("ZELLIJ", raising=False)
         _init_repo(tmp_path)
         subprocess.run(["git", "checkout", "-b", "agent/empty"],
@@ -2369,11 +2217,11 @@ class TestOfferMerge:
         subprocess.run(["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True)
 
         outcome = _offer_merge("agent/empty", tmp_path)
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "no commits" in out.lower()
         assert outcome == "no commits"
 
-    def test_merge_y_squashes_into_one_commit_and_deletes_branch(self, tmp_path, capsys, monkeypatch):
+    def test_merge_y_squashes_into_one_commit_and_deletes_branch(self, tmp_path, caplog, monkeypatch):
         monkeypatch.delenv("ZELLIJ", raising=False)
         env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
                "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
@@ -2394,7 +2242,7 @@ class TestOfferMerge:
         with patch("builtins.input", return_value="y"):
             outcome = _offer_merge("agent/feat", tmp_path, task="add a and b")
 
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "squashed" in out.lower()
         assert outcome == "merged"
 
@@ -2409,7 +2257,7 @@ class TestOfferMerge:
         assert len(log) == 2  # init + one squash commit
         assert "add a and b" in log[0]  # subject is the task description
 
-    def test_merge_y_stamps_verified_into_staged_concept_files(self, tmp_path, capsys, monkeypatch):
+    def test_merge_y_stamps_verified_into_staged_concept_files(self, tmp_path, monkeypatch):
         monkeypatch.delenv("ZELLIJ", raising=False)
         env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
                "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
@@ -2440,7 +2288,7 @@ class TestOfferMerge:
                                 capture_output=True, text=True, check=False).stdout
         assert status.strip() == ""
 
-    def test_merge_n_preserves_branch_and_prints_instructions(self, tmp_path, capsys, monkeypatch):
+    def test_merge_n_preserves_branch_and_prints_instructions(self, tmp_path, caplog, monkeypatch):
         monkeypatch.delenv("ZELLIJ", raising=False)
         _init_repo(tmp_path)
         _make_branch_with_commit(tmp_path, "agent/feat", "add feature")
@@ -2448,7 +2296,7 @@ class TestOfferMerge:
         with patch("builtins.input", return_value="n"):
             outcome = _offer_merge("agent/feat", tmp_path)
 
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "agent/feat" in out  # instructions mention the branch name
         assert "--squash" in out    # squash-merge instructions, not ff
         assert outcome == "declined"
@@ -2460,7 +2308,26 @@ class TestOfferMerge:
             ["git", "branch", "-D", "agent/feat"], cwd=tmp_path, capture_output=True, check=False
         )
 
-    def test_code_health_issues_printed_before_prompt(self, tmp_path, capsys, monkeypatch):
+    def test_review_critiques_printed_before_prompt(self, tmp_path, caplog, monkeypatch):
+        monkeypatch.delenv("ZELLIJ", raising=False)
+        _init_repo(tmp_path)
+        _make_branch_with_commit(tmp_path, "agent/feat", "add feature")
+
+        critiques = {1: "Missing error handling on the new endpoint."}
+
+        with patch("builtins.input", return_value="n"):
+            _offer_merge("agent/feat", tmp_path, critiques=critiques)
+
+        out = caplog.text
+        assert "[review]" in out
+        assert "Task 1:" in out
+        assert "Missing error handling on the new endpoint." in out
+        # cleanup
+        subprocess.run(
+            ["git", "branch", "-D", "agent/feat"], cwd=tmp_path, capture_output=True, check=False
+        )
+
+    def test_code_health_issues_printed_before_prompt(self, tmp_path, caplog, monkeypatch):
         monkeypatch.delenv("ZELLIJ", raising=False)
         _init_repo(tmp_path)
         _make_branch_with_commit(tmp_path, "agent/feat", "add feature")
@@ -2470,7 +2337,7 @@ class TestOfferMerge:
         with patch("builtins.input", return_value="n"):
             _offer_merge("agent/feat", tmp_path, code_health_issues=code_health_issues)
 
-        out = capsys.readouterr().out
+        out = caplog.text
         assert "[code-health]" in out
         assert "Task 1:" in out
         assert "NLOC 60 exceeds threshold 50" in out
@@ -2505,7 +2372,7 @@ class TestOfferMerge:
         called_paths = [call.args[0] for call in mock_edit.call_args_list]
         assert str(narrative_path) in called_paths
 
-    def test_noop_sandbox_skips_merge_offer(self, tmp_path, monkeypatch, capsys):
+    def test_noop_sandbox_skips_merge_offer(self, tmp_path, monkeypatch):
         """NoopSandbox yields branch=''; run_loop must not call _offer_merge."""
         _make_project(tmp_path)
         monkeypatch.chdir(tmp_path)
@@ -2531,13 +2398,13 @@ class TestOfferMerge:
 
         mock_merge.assert_not_called()
 
-    def test_truthy_branch_passes_narrative_path_and_appends_returned_outcome(
+    def test_truthy_branch_passes_log_path_and_appends_returned_outcome(
         self, tmp_path, monkeypatch
     ):
         """
         Covers the run_loop() handoff at the handle.branch check: _offer_merge
-        must be called with the narrative file's path, and whatever it returns
-        must be the exact value passed on to _append_narrative_outcome.
+        must be called with the run's log file path, and the returned outcome
+        must be appended to that same file.
         """
         _make_project(tmp_path)
         monkeypatch.chdir(tmp_path)
@@ -2561,20 +2428,18 @@ class TestOfferMerge:
              patch("runner.loop._run_sensors", return_value=[]), \
              patch("runner.loop._commit_task"), \
              patch("runner.loop._offer_merge", return_value="merged") as mock_offer, \
-             patch("runner.loop._append_narrative_outcome") as mock_append, \
-             patch("runner.loop._update_coverage_baseline") as mock_baseline, \
-             patch("builtins.print"):
+             patch("runner.loop._update_coverage_baseline") as mock_baseline:
             code = run_loop("task")
 
         assert code == 0
         mock_offer.assert_called_once()
         args, kwargs = mock_offer.call_args
         assert args[0] == "agent/fake-branch"
-        narrative_path = kwargs["narrative_path"]
-        assert narrative_path.parent == tmp_path / "logs"
-        assert narrative_path.name.startswith("run-") and narrative_path.name.endswith(".md")
-        assert narrative_path.exists()
-        mock_append.assert_called_once_with(narrative_path, "merged")
+        log_path = kwargs["narrative_path"]
+        assert log_path.parent == tmp_path / "logs"
+        assert log_path.name.startswith("run-") and log_path.name.endswith(".log")
+        assert log_path.exists()
+        assert "\n## Outcome\nmerged\n" in log_path.read_text()
         mock_baseline.assert_called_once_with(Path.cwd().resolve())
 
     def test_declined_outcome_does_not_update_coverage_baseline(self, tmp_path, monkeypatch):
@@ -2600,9 +2465,7 @@ class TestOfferMerge:
              patch("runner.loop._run_sensors", return_value=[]), \
              patch("runner.loop._commit_task"), \
              patch("runner.loop._offer_merge", return_value="declined"), \
-             patch("runner.loop._append_narrative_outcome"), \
-             patch("runner.loop._update_coverage_baseline") as mock_baseline, \
-             patch("builtins.print"):
+             patch("runner.loop._update_coverage_baseline") as mock_baseline:
             code = run_loop("task")
 
         assert code == 0
@@ -2667,6 +2530,56 @@ class TestPerformSquashMergeVerification:
 
         mock_stamp.assert_not_called()
         assert outcome == "merged"
+
+    def test_squash_failure_preserves_branch_and_logs(self, tmp_path, caplog):
+        _init_repo(tmp_path)
+        _make_branch_with_commit(tmp_path, "agent/feat", "add feature")
+
+        with patch(
+            "runner.loop.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                ["git", "merge", "--squash", "agent/feat"], 1, stdout="", stderr="conflict"
+            ),
+        ):
+            outcome = _perform_squash_merge(
+                "agent/feat", tmp_path, "add feature", ["add feature"]
+            )
+
+        assert outcome == "squash failed"
+        assert "squash failed" in caplog.text.lower()
+        assert "preserved" in caplog.text.lower()
+
+    def test_commit_failure_preserves_branch_and_logs(self, tmp_path, caplog):
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        _init_repo(tmp_path)
+        subprocess.run(["git", "checkout", "-b", "agent/feat"],
+                       cwd=tmp_path, check=True, capture_output=True)
+        (tmp_path / "a.txt").write_text("a")
+        subprocess.run(["git", "add", "a.txt"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "Task 1: add a"],
+                       cwd=tmp_path, check=True, capture_output=True, env=env)
+        subprocess.run(["git", "checkout", "-"], cwd=tmp_path, check=True, capture_output=True)
+
+        real_run = subprocess.run
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd[:2] == ["git", "commit"]:
+                return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="commit hook rejected")
+            return real_run(cmd, *args, **kwargs)
+
+        with patch("runner.loop.subprocess.run", side_effect=fake_run):
+            outcome = _perform_squash_merge(
+                "agent/feat", tmp_path, "add a", ["Task 1: add a"]
+            )
+
+        assert outcome == "commit failed"
+        assert "commit failed" in caplog.text.lower()
+        assert "commit hook rejected" in caplog.text
+        assert "preserved" in caplog.text.lower()
+        branches = subprocess.run(["git", "branch"], cwd=tmp_path,
+                                  capture_output=True, text=True, check=False).stdout
+        assert "agent/feat" in branches
 
 
 class TestShowDiffInEditor:

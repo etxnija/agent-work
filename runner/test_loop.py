@@ -39,6 +39,7 @@ from runner.loop import (
     _run_sensors,
     _run_sensors_with_retry,
     _show_diff_in_editor,
+    _squash_subject,
     _stamp_verified,
     _task_diff,
     _task_title,
@@ -1865,6 +1866,32 @@ def _make_branch_with_commit(repo: Path, branch: str, message: str) -> None:
     subprocess.run(["git", "checkout", "-"], cwd=repo, check=True, capture_output=True)
 
 
+def _make_branch_with_file_commit(repo: Path, branch: str, message: str) -> None:
+    """Like _make_branch_with_commit, but stages a real file so the commit
+    isn't empty — required for callers that then squash-merge the branch,
+    since `git commit` fails with nothing staged."""
+    env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+           "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+    subprocess.run(["git", "checkout", "-b", branch], cwd=repo, check=True, capture_output=True)
+    (repo / "change.txt").write_text(message)
+    subprocess.run(["git", "add", "change.txt"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", message],
+                   cwd=repo, check=True, capture_output=True, env=env)
+    subprocess.run(["git", "checkout", "-"], cwd=repo, check=True, capture_output=True)
+
+
+def _last_commit_subject(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "log", "-1", "--format=%s"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _last_commit_body(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "log", "-1", "--format=%B"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+
+
 class TestCommitTask:
     def _init_repo(self, path: Path) -> None:
         env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
@@ -2102,6 +2129,27 @@ class TestWorkerSummary:
     def test_multiline_trailing_text_keeps_only_first_line(self):
         text = "Done.\nSUMMARY: Fixed the bug.\nThis extra line should be dropped."
         assert _worker_summary(text) == "Fixed the bug."
+
+
+class TestSquashSubject:
+    def test_empty_task_falls_back_to_branch(self):
+        assert _squash_subject("   ", "agent/test") == "agent/test"
+
+    def test_short_first_line_used_verbatim(self):
+        assert _squash_subject("Add the foo helper", "agent/test") == "Add the foo helper"
+
+    def test_only_first_line_considered(self):
+        task = "Short subject\nA much longer body line that would not fit otherwise."
+        assert _squash_subject(task, "agent/test") == "Short subject"
+
+    def test_long_first_line_truncated_at_word_boundary(self):
+        first_line = "word " * 20  # 100 chars, well past the 72-char limit
+        expected = "word word word word word word word word word word word word word word…"
+        assert _squash_subject(first_line, "agent/test") == expected
+
+    def test_long_first_line_without_spaces_hard_truncated(self):
+        first_line = "x" * 100
+        assert _squash_subject(first_line, "agent/test") == "x" * 72 + "…"
 
 
 class TestBranchCommits:
@@ -2580,6 +2628,72 @@ class TestPerformSquashMergeVerification:
         branches = subprocess.run(["git", "branch"], cwd=tmp_path,
                                   capture_output=True, text=True, check=False).stdout
         assert "agent/feat" in branches
+
+    def test_short_task_becomes_exact_subject(self, tmp_path):
+        _init_repo(tmp_path)
+        _make_branch_with_file_commit(tmp_path, "agent/feat", "Task 1: add test concept")
+
+        task = "add test concept"
+        outcome = _perform_squash_merge(
+            "agent/feat", tmp_path, task, ["Task 1: add test concept"]
+        )
+
+        assert outcome == "merged"
+        assert _last_commit_subject(tmp_path) == task
+
+    def test_long_multiline_task_truncated_subject(self, tmp_path):
+        _init_repo(tmp_path)
+        _make_branch_with_file_commit(tmp_path, "agent/feat", "Task 1: refactor module")
+
+        task = (
+            "Refactor the authentication module to split token validation "
+            "from session management.\n\n"
+            "This addresses a long-standing coupling issue where the two "
+            "concerns were tangled together in a single class, making it "
+            "hard to test either in isolation.\n\n"
+            "Follow-up work will extend this to cover the OAuth callback "
+            "path as well, once the core split lands."
+        )
+        assert len(task) >= 300
+        assert task.count("\n") >= 3
+
+        outcome = _perform_squash_merge(
+            "agent/feat", tmp_path, task, ["Task 1: refactor module"]
+        )
+
+        assert outcome == "merged"
+        subject = _last_commit_subject(tmp_path)
+        assert len(subject) <= 73
+
+        body = _last_commit_body(tmp_path)
+        assert task in body
+
+    def test_truncation_at_word_boundary(self, tmp_path):
+        _init_repo(tmp_path)
+        _make_branch_with_file_commit(tmp_path, "agent/feat", "Task 1: add words")
+
+        task = ("word " * 20).strip()
+
+        outcome = _perform_squash_merge(
+            "agent/feat", tmp_path, task, ["Task 1: add words"]
+        )
+
+        assert outcome == "merged"
+        subject = _last_commit_subject(tmp_path)
+        assert subject.endswith("…")
+
+        core = subject[:-1]
+        assert len(core) < len(task)
+        assert task[len(core)] == " "
+
+    def test_empty_task_falls_back_to_branch(self, tmp_path):
+        _init_repo(tmp_path)
+        _make_branch_with_file_commit(tmp_path, "agent/feat", "Task 1: add a")
+
+        outcome = _perform_squash_merge("agent/feat", tmp_path, "   ", ["Task 1: add a"])
+
+        assert outcome == "merged"
+        assert _last_commit_subject(tmp_path) == "agent/feat"
 
 
 class TestShowDiffInEditor:

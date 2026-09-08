@@ -556,6 +556,27 @@ def _worker_summary(text: str) -> str:
 
 # ── Git helpers ──────────────────────────────────────────────────────────────
 
+def _squash_subject(task: str, branch: str) -> str:
+    """
+    Derive a short commit subject from the task string, falling back to the
+    branch name if the task is empty. The full task text is preserved
+    separately in the commit body, so truncation here is safe.
+    """
+    task = task.strip()
+    if not task:
+        return branch
+
+    first_line = task.splitlines()[0]
+    if len(first_line) <= 72:
+        return first_line
+
+    truncated = first_line[:72]
+    cut = truncated.rfind(" ")
+    if cut == -1:
+        return f"{truncated}…"
+    return f"{truncated[:cut]}…"
+
+
 def _commit_task(task_num: int, title: str, worktree: Path) -> None:
     """
     Stage all changes in the worktree and commit them with a task-scoped message.
@@ -760,9 +781,11 @@ def _perform_squash_merge(branch: str, project_root: Path, task: str, commits: l
             _stamp_verified(project_root / path)
             subprocess.run(["git", "add", rel_path], cwd=project_root, capture_output=True, check=False)
 
-    # Build a single commit message: task as subject, per-task commits as body.
-    subject = task.strip() or branch
+    # Build a single commit message: short subject, per-task commits + full task as body.
+    subject = _squash_subject(task, branch)
     body = "\n".join(f"- {c}" for c in commits)
+    if task.strip():
+        body = f"{body}\n\n{task.strip()}"
     commit_msg = f"{subject}\n\n{body}"
 
     commit = subprocess.run(

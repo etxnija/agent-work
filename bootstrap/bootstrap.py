@@ -51,6 +51,7 @@ Language: {lang}
 
 ## Patterns & Conventions
 - (add project-specific patterns here)
+{lang_patterns}
 
 ## Memory model
 
@@ -98,6 +99,18 @@ LANG_TESTING = {
     "go":         "- Use table-driven tests (see existing *_test.go files for examples)",
     "typescript": "- Use the test framework already in the project (check package.json)",
     "python":     "- Use pytest; follow fixture patterns in existing tests",
+    "":           "",
+}
+
+LANG_PATTERNS = {
+    "go": """\
+- Domain/service logic lives in the root package (center of hexagon)
+- Each adapter lives in its own package, named after what it adapts
+- Ports (interfaces) are defined in the domain/service package, not the adapter
+- One-way dependency: adapters import domain, never the reverse; `cmd/` wires both via DI
+- Don't scaffold empty adapters/interfaces upfront — apply the structure as real integrations are added""",
+    "typescript": "",
+    "python":     "",
     "":           "",
 }
 
@@ -305,7 +318,7 @@ def bootstrap(project_dir: Path, lang: str) -> None:
 
     _write_if_missing(
         project_dir / "AGENTS.md",
-        AGENTS_MD_TEMPLATE.format(lang=lang or "not specified", lang_testing=LANG_TESTING.get(lang, "")),
+        AGENTS_MD_TEMPLATE.format(lang=lang or "not specified", lang_testing=LANG_TESTING.get(lang, ""), lang_patterns=LANG_PATTERNS.get(lang, "")),
         project_dir,
     )
     _write_if_missing(

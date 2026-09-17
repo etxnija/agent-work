@@ -9,6 +9,11 @@ Creates:
         AGENTS.md               harness conventions for this project
         memory/
             status.md           session work log
+            concepts/
+                index.md        durable concept index
+        docs/
+            arch/
+                adr/            decision records (empty until first ADR)
         agents/                 sub-agent definitions (populated from harness)
         sensors/                lint/test/lsp scripts (language-specific stubs)
         .claude/
@@ -47,6 +52,22 @@ Language: {lang}
 ## Patterns & Conventions
 - (add project-specific patterns here)
 
+## Memory model
+
+- Everything under `memory/` (`status.md`, `memory/concepts/*.md`), this file, and
+  `docs/arch/adr/*.md` is **project memory, not personal notes** — git-tracked, reviewed
+  like code, meant for any future contributor or agent working this repo, not just whoever
+  wrote it.
+- `memory/concepts/*.md` and `docs/arch/adr/*.md` are the durable layer: topic-scoped,
+  YAML-tagged (concepts), immutable-once-accepted (ADRs). This is what gets fed to agents
+  as bounded context — keep it current, not `status.md`.
+- `memory/status.md` is the raw chronological log — append-only, currently unattributed
+  (no author/session field). Treat entries as project history, not a personal journal, even
+  though nothing yet records who or which run wrote them.
+- Plain markdown in git was a deliberate choice: portable across AI tools/drivers (no
+  vendor lock-in to any one tool's native memory) and shareable across contributors with
+  the same git workflow as code — one structure serving both goals.
+
 ## Gotchas
 - (add things that have tripped agents up)
 
@@ -55,6 +76,18 @@ Language: {lang}
   do not need a task for this
 - New code must have tests; do not delete tests to make coverage pass
 {lang_testing}
+
+## ADR conventions
+
+- Short and sharp: ~20-30 lines total. If a draft runs past ~40 lines, cut it, don't
+  scope-expand it.
+- **Context**: one short paragraph — the problem/constraint, not a transcript of the
+  design discussion that led to the decision.
+- **Decision**: a few lines, imperative mood. The choice itself, not the reasoning
+  (that's Context) or the alternatives (mention a rejected one in a single line only
+  if it stops someone from re-litigating it later).
+- **Consequences**: a bullet list, one line each. Trade-offs accepted, not restated
+  rationale.
 
 ## Style
 - Follow the existing code style in the repo
@@ -108,6 +141,19 @@ MISE_TOML_TEMPLATE = """\
 # Same Python version as the agent harness — makes `agent` available directly
 # in this directory without needing `mise exec`.
 python = "{python_version}"
+"""
+
+CONCEPTS_INDEX_TEMPLATE = """\
+# Concept Index
+
+Index of durable codebase concepts, patterns, decisions, and components.
+Each concept file contains YAML frontmatter metadata (`type`, `tags`, `summary`, `links`, `updated`).
+`type` is one of `pattern`, `component`, or `decision`.
+
+---
+
+(add one bullet per concept file as they're created, in this format:)
+- **[name.md](name.md)** (`type: X` | `tags: [...]`) — one-line summary.
 """
 
 COVERAGERC_TEMPLATE = """\
@@ -230,6 +276,8 @@ def _copy_if_missing(src: Path, dest: Path, project_dir: Path, executable: bool 
 def _make_dirs(project_dir: Path) -> None:
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "memory").mkdir(exist_ok=True)
+    (project_dir / "memory" / "concepts").mkdir(exist_ok=True)
+    (project_dir / "docs" / "arch" / "adr").mkdir(parents=True, exist_ok=True)
     (project_dir / "agents").mkdir(exist_ok=True)
     (project_dir / "sensors").mkdir(exist_ok=True)
     (project_dir / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
@@ -263,6 +311,11 @@ def bootstrap(project_dir: Path, lang: str) -> None:
     _write_if_missing(
         project_dir / "memory" / "status.md",
         STATUS_MD_TEMPLATE.format(date=datetime.now(tz=UTC).date().isoformat(), lang=lang or "not specified"),
+        project_dir,
+    )
+    _write_if_missing(
+        project_dir / "memory" / "concepts" / "index.md",
+        CONCEPTS_INDEX_TEMPLATE,
         project_dir,
     )
     _copy_subagents(project_dir)

@@ -964,3 +964,8 @@ Plan written but not approved by human.
 
 ### Done
 - Added `_squash_subject(task: str, branch: str) -> str` in `runner/loop.py` (next to the git helpers, ahead of `_commit_task`): returns `branch` for an empty/whitespace-only task, otherwise the task's first line if ≤72 chars, else that line truncated at the last space at-or-before position 72 with a trailing `…` (or a hard cut at 72 + `…` if there's no space, e.g. one long word). Wired into `_perform_squash_merge()` in place of the old `subject = task.strip() or branch`, and the commit body now appends the full `task.strip()` text (blank-line separated) after the existing per-task-commit bullet list, so the squash commit keeps a short subject line while preserving the complete original task/prompt text in the body. 134 tests passing, `ruff check .` and `pyright runner/loop.py` clean.
+
+## 2026-09-17 — Bootstrap scaffolds the three-layer memory model
+
+### Done
+- `bootstrap/bootstrap.py`: `_make_dirs()` now creates `memory/concepts/` and `docs/arch/adr/`; added `CONCEPTS_INDEX_TEMPLATE` (written via `_write_if_missing` to `memory/concepts/index.md`); `AGENTS_MD_TEMPLATE` gained `## Memory model` (after Patterns & Conventions) and `## ADR conventions` (after Testing) sections, adapted from this harness's own `AGENTS.md` but made generic. New `TestBootstrapMemoryModel` class in `bootstrap/test_bootstrap.py` covers template match, empty ADR dir, section headers, and no-clobber on re-run. 258 tests passing, `ruff check` and `pyright` clean.

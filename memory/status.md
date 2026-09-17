@@ -969,3 +969,6 @@ Plan written but not approved by human.
 
 ### Done
 - `bootstrap/bootstrap.py`: `_make_dirs()` now creates `memory/concepts/` and `docs/arch/adr/`; added `CONCEPTS_INDEX_TEMPLATE` (written via `_write_if_missing` to `memory/concepts/index.md`); `AGENTS_MD_TEMPLATE` gained `## Memory model` (after Patterns & Conventions) and `## ADR conventions` (after Testing) sections, adapted from this harness's own `AGENTS.md` but made generic. New `TestBootstrapMemoryModel` class in `bootstrap/test_bootstrap.py` covers template match, empty ADR dir, section headers, and no-clobber on re-run. 258 tests passing, `ruff check` and `pyright` clean.
+
+
+**Run metrics:** 3 driver call(s), $1.6713, session 36fd65f0-8a29-4821-b6eb-ef8b2ac8730d

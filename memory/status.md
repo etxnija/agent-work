@@ -980,3 +980,6 @@ Plan written but not approved by human.
 
 ### Done
 - Appended four bullets to `LANG_PATTERNS["go"]` in `bootstrap/bootstrap.py`: use `log/slog` (stdlib) for structured logging, logs to stderr via `slog.NewJSONHandler(os.Stderr, nil)`, log key facts as structured fields, no new dependency needed (stdlib since Go 1.21). `bootstrap/test_bootstrap.py` (9 tests) and `ruff check` pass.
+
+
+**Run metrics:** 5 driver call(s), $1.3261, session 92758806-54a9-494b-983e-8eafd01e3747

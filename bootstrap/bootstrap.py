@@ -108,7 +108,12 @@ LANG_PATTERNS = {
 - Each adapter lives in its own package, named after what it adapts
 - Ports (interfaces) are defined in the domain/service package, not the adapter
 - One-way dependency: adapters import domain, never the reverse; `cmd/` wires both via DI
-- Don't scaffold empty adapters/interfaces upfront — apply the structure as real integrations are added""",
+- Don't scaffold empty adapters/interfaces upfront — apply the structure as real integrations are added
+- Use `log/slog` (stdlib) for structured logging — Info for normal operational events, Error for failures. Don't use `fmt.Println`/`fmt.Fprintln` for anything except a program's actual output.
+- Structured logs go to stderr (`slog.NewJSONHandler(os.Stderr, nil)`); stdout is reserved for a program's real output, so the two never interleave.
+- Log key facts as structured fields (counts, IDs, error causes), not just a bare message.
+- No new dependency for this — `log/slog` is stdlib since Go 1.21.
+""",
     "typescript": "",
     "python":     "",
     "":           "",

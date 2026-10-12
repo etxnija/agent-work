@@ -988,3 +988,6 @@ Plan written but not approved by human.
 
 ### Done
 - Pinned `model: claude-sonnet-5-5` in `agents/worker.md`; added optional `model=` to `AgentDriver.run()` plus a non-abstract `agent_model()` (default `None`), implemented in `ClaudeDriver` (shared `_model_args` helper builds `--model` for both `run` and `run_subagent`) and forwarded by `_MeteredDriver`; `_run_task_checks` resolves the Worker's model once and threads it to all three corrective `driver.run()` calls. 269 tests passing, diff coverage 100%, `ruff`/`pyright` clean.
+
+
+**Run metrics:** 3 driver call(s), $2.0763, session 4253bc1c-d37f-4598-9561-3e32f14ec352

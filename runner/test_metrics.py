@@ -62,9 +62,28 @@ class TestMeteredDriver:
         result = driver.run("prompt", context_files=["a.md"], cwd=Path("/tmp"))
 
         inner.run.assert_called_once_with(
-            "prompt", context_files=["a.md"], cwd=Path("/tmp")
+            "prompt", context_files=["a.md"], cwd=Path("/tmp"), model=None
         )
         assert result == inner.run.return_value
+
+    def test_run_forwards_model(self):
+        inner = MagicMock()
+        inner.run.return_value = _ok("response")
+        driver = _MeteredDriver(inner, Metrics())
+
+        driver.run("prompt", model="m")
+
+        inner.run.assert_called_once_with("prompt", context_files=None, cwd=None, model="m")
+
+    def test_agent_model_delegates_without_recording(self):
+        inner = MagicMock()
+        inner.agent_model.return_value = "claude-sonnet-5-5"
+        metrics = Metrics()
+        driver = _MeteredDriver(inner, metrics)
+
+        assert driver.agent_model("worker") == "claude-sonnet-5-5"
+        inner.agent_model.assert_called_once_with("worker")
+        assert metrics.calls == 0
 
     def test_run_subagent_delegates_args_and_return_value(self):
         inner = MagicMock()

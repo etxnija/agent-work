@@ -3,7 +3,8 @@ type: component
 tags: [sensors, coverage, lint, pyright, code-health]
 summary: Computational sensors, linting, LSP type-checking, diff-coverage, and code-health checks.
 links: [docs/arch/adr/0010-sensor-feedback-retry.md]
-updated: 2026-08-11
+updated: 2026-10-12
+verified: [{ by: "human", at: 2026-10-12 }]
 ---
 
 # Sensors, Coverage & Code-Health
@@ -14,6 +15,7 @@ Deterministic computational checks beat vague LLM critiques for convergent code 
 ## Key Rules & Mechanics
 - **Sensor Execution (`_run_sensors` in `runner/loop.py`):** Automatically globs and runs executable scripts in `sensors/*.sh` in sorted order (`lint.sh`, `test.sh`, `lsp.sh`). Short-circuits on the first failing script.
 - **Sensor Retry Loop (`_run_sensors_with_retry`):** Retries failing sensors up to `SENSOR_RETRY_LIMIT = 2` times with a corrective worker call between attempts. Fails closed (stops execution, preserves branch) if sensors remain broken after retries.
+- **Corrective Call Model:** Corrective calls (sensor, code-health, and review) are plain `driver.run()` calls — not `run_subagent()`, which would re-inject the Worker persona body — but they pass `model=driver.agent_model("worker")`, so they run on the model pinned in `agents/worker.md` frontmatter rather than the CLI default. `_run_task_checks` resolves it once per task and threads it through every retry helper.
 - **Mechanical Auto-Fixes (`sensors/lint.sh`):** Linters run auto-fixers (`ruff check --fix .`) first so mechanical syntax/formatting issues resolve for 0 tokens without spending LLM retry calls.
 - **Batch LSP Diagnostics (`sensors/lsp.sh`):** Uses batch one-shot CLI type-checking (`pyright --outputjson`) to feed language-server diagnostics into corrective prompts.
 - **Coverage Enforcement:** Requires 100% diff-aware test coverage on new/changed lines (`diff-cover`), backed by a whole-repo regression floor (`.coverage-baseline`) with a 1.0% tolerance.

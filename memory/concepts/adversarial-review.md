@@ -3,7 +3,8 @@ type: pattern
 tags: [reviewer, review, haiku, clean-slate, retry]
 summary: Adversarial review sub-agent cycle, verdict parsing, and non-blocking critique retries.
 links: [docs/arch/adr/0013-adversarial-review-marker-and-non-blocking-retry.md]
-updated: 2026-08-11
+updated: 2026-10-12
+verified: [{ by: "human", at: 2026-10-12 }]
 ---
 
 # Adversarial Review
@@ -17,7 +18,7 @@ Computational sensors (linters, tests, type checks) catch deterministic bugs, bu
 - **Verdict Markers (`_review_verdict`):** The Reviewer signals decisions via explicit marker lines:
   - `REVIEW: APPROVED <one-sentence reasoning>`
   - `REVIEW: CHANGES REQUESTED <actionable critique>`
-- **Non-Blocking Retry Budget (`_run_review_with_retry`):** If changes are requested, the critique is fed back to the worker for corrective implementation (up to `REVIEW_RETRY_LIMIT = 2`). Unlike sensors, if the review budget is exhausted, the task commits anyway and the critique is surfaced at merge time.
+- **Non-Blocking Retry Budget (`_run_review_with_retry`):** If changes are requested, the critique is fed back to the worker for corrective implementation (up to `REVIEW_RETRY_LIMIT = 2`). Unlike sensors, if the review budget is exhausted, the task commits anyway and the critique is surfaced at merge time. The corrective call runs on the Worker's pinned model (see `sensors-coverage.md`).
 
 ## Gotchas & Failure Modes
 - **Marker Line Parsing:** Marker parsing relies on exact string signals. Ambiguous output without a clear marker defaults conservatively to `CHANGES REQUESTED`.

@@ -266,6 +266,7 @@ def _run_sensors_with_retry(
     status_abs: str,
     driver: AgentDriver,
     context_files: list[str] | None = None,
+    model: str | None = None,
 ) -> tuple[list[tuple[str, str]], int]:
     """
     Run sensors, retrying up to SENSOR_RETRY_LIMIT times with a corrective
@@ -297,6 +298,7 @@ def _run_sensors_with_retry(
             corrective_prompt,
             context_files=ctx,
             cwd=worktree,
+            model=model,
         )
         if corrective_result.exit_code != 0:
             logger.error(
@@ -323,6 +325,7 @@ def _run_code_health_with_retry(
     status_abs: str,
     driver: AgentDriver,
     context_files: list[str] | None = None,
+    model: str | None = None,
 ) -> tuple[list[str], int]:
     """
     Run the lizard-based code-health check, retrying up to
@@ -356,6 +359,7 @@ def _run_code_health_with_retry(
             corrective_prompt,
             context_files=ctx,
             cwd=worktree,
+            model=model,
         )
         if corrective_result.exit_code != 0:
             logger.error(
@@ -397,11 +401,19 @@ def _run_single_review(
 
 
 def _apply_review_corrective(
-    driver: AgentDriver, critique: str, ctx: list[str], worktree: Path, i: int, total: int
+    driver: AgentDriver,
+    critique: str,
+    ctx: list[str],
+    worktree: Path,
+    i: int,
+    total: int,
+    model: str | None = None,
 ) -> bool:
     """Run a corrective worker call for a review critique. Returns True on success."""
     corrective_prompt = f"{REVIEW_CORRECTIVE_INSTRUCTIONS}\n\n{critique}"
-    corrective_result = driver.run(corrective_prompt, context_files=ctx, cwd=worktree)
+    corrective_result = driver.run(
+        corrective_prompt, context_files=ctx, cwd=worktree, model=model
+    )
     if corrective_result.exit_code != 0:
         logger.error(
             f"[error] Corrective worker call failed on task {i}/{total}:\n"
@@ -420,6 +432,7 @@ def _retry_review_correction(
     total: int,
     review_critiques: dict[int, str],
     review_attempt: int,
+    model: str | None = None,
 ) -> bool:
     """Log the retry and apply the corrective worker call. Returns False if the
     corrective call failed (critique recorded on review_critiques in that case)."""
@@ -428,7 +441,9 @@ def _retry_review_correction(
         f"(attempt {review_attempt}/{REVIEW_RETRY_LIMIT})."
     )
     logger.info(f"[worker:corrective] Task {i}/{total}: Applying reviewer correction...")
-    if not _apply_review_corrective(driver, critique, ctx, worktree, i, total):
+    if not _apply_review_corrective(
+        driver, critique, ctx, worktree, i, total, model=model
+    ):
         review_critiques[i] = critique
         return False
     return True
@@ -445,6 +460,7 @@ def _run_review_with_retry(
     driver: AgentDriver,
     review_critiques: dict[int, str],
     context_files: list[str] | None = None,
+    model: str | None = None,
 ) -> tuple[bool, str, int, int, list[tuple[str, str]]]:
     """
     Run the adversarial-review cycle for one task, retrying up to
@@ -481,12 +497,14 @@ def _run_review_with_retry(
 
         review_attempt += 1
         if not _retry_review_correction(
-            driver, critique, ctx, worktree, i, total, review_critiques, review_attempt
+            driver, critique, ctx, worktree, i, total, review_critiques, review_attempt,
+            model=model,
         ):
             return approved, critique, review_attempt, sensor_retry_count, []
 
         failures, attempt = _run_sensors_with_retry(
-            worktree, i, total, plan_abs, agents_abs, status_abs, driver, context_files=ctx
+            worktree, i, total, plan_abs, agents_abs, status_abs, driver,
+            context_files=ctx, model=model,
         )
         sensor_retry_count += attempt
         if failures:
@@ -1027,15 +1045,20 @@ def _run_task_checks(
     failure code_health_findings is None and failures is non-empty — the
     caller must stop the loop.
     """
+    # Corrective calls are plain run() calls on the Worker's behalf, so they use
+    # the model the Worker definition pins.
+    worker_model = driver.agent_model(WORKER_AGENT)
     failures, _ = _run_sensors_with_retry(
-        handle.path, i, total, plan_abs, agents_abs, status_abs, driver, context_files=task_context
+        handle.path, i, total, plan_abs, agents_abs, status_abs, driver,
+        context_files=task_context, model=worker_model,
     )
     if failures:
         return None, failures
 
     # ── Code health (lizard: complexity, size, duplication) ──────────────────
     findings, _ = _run_code_health_with_retry(
-        handle.path, i, total, plan_abs, agents_abs, status_abs, driver, context_files=task_context
+        handle.path, i, total, plan_abs, agents_abs, status_abs, driver,
+        context_files=task_context, model=worker_model,
     )
 
     # ── Adversarial review ────────────────────────────────────────────────────
@@ -1050,6 +1073,7 @@ def _run_task_checks(
         driver,
         review_critiques,
         context_files=task_context,
+        model=worker_model,
     )
     if failures:
         return None, failures

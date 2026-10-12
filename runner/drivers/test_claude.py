@@ -102,13 +102,13 @@ class TestLoadAgentDefinition:
         assert body == "You review."
         assert model == "claude-opus-4-6"
 
-    def test_worker_definition_has_no_tools_no_model(self, monkeypatch):
+    def test_worker_definition_has_no_tools_and_pins_sonnet(self, monkeypatch):
         import runner.drivers.claude as mod
         monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [Path("agents")])
 
         _, tools, model = _load_agent_definition("worker")
         assert tools == []
-        assert model is None
+        assert model == "claude-sonnet-5-5"
 
     def test_not_found_returns_none_and_empty(self, tmp_path, monkeypatch):
         import runner.drivers.claude as mod
@@ -283,6 +283,54 @@ class TestClaudeDriverRun:
             ClaudeDriver().run("prompt", cwd=tmp_path)
 
         assert mock_run.call_args[1]["cwd"] == tmp_path
+
+    def test_run_with_model_appends_model_flag(self):
+        mock_result = MagicMock(stdout="ok\n", returncode=0)
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            ClaudeDriver().run("p", model="claude-sonnet-5-5")
+
+        cmd = mock_run.call_args[0][0]
+        idx = cmd.index("--model")
+        assert cmd[idx + 1] == "claude-sonnet-5-5"
+        assert "--dangerously-skip-permissions" in cmd
+        assert "p" in cmd
+
+    def test_run_without_model_omits_model_flag(self):
+        mock_result = MagicMock(stdout="ok\n", returncode=0)
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            ClaudeDriver().run("p")
+
+        assert "--model" not in mock_run.call_args[0][0]
+
+
+# ── ClaudeDriver.agent_model ──────────────────────────────────────────────────
+
+class TestClaudeDriverAgentModel:
+    CASES: ClassVar[list] = [
+        pytest.param(
+            "---\nname: worker\nmodel: claude-sonnet-5-5\n---\nYou are the worker.",
+            "claude-sonnet-5-5",
+            id="model_pinned",
+        ),
+        pytest.param(
+            "---\nname: worker\n---\nYou are the worker.",
+            None,
+            id="no_model_field",
+        ),
+        pytest.param(None, None, id="missing_agent"),
+    ]
+
+    @pytest.mark.parametrize("content,expected", CASES)
+    def test_agent_model(self, tmp_path, monkeypatch, content, expected):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        if content is not None:
+            (agent_dir / "worker.md").write_text(content)
+
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        assert ClaudeDriver().agent_model("worker") == expected
 
 
 # ── ClaudeDriver.run_subagent ─────────────────────────────────────────────────

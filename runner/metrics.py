@@ -34,8 +34,9 @@ class _MeteredDriver(AgentDriver):
         prompt: str,
         context_files: list[str] | None = None,
         cwd: Path | None = None,
+        model: str | None = None,
     ) -> AgentResult:
-        result = self._inner.run(prompt, context_files=context_files, cwd=cwd)
+        result = self._inner.run(prompt, context_files=context_files, cwd=cwd, model=model)
         self._metrics.record(result)
         return result
 
@@ -51,3 +52,7 @@ class _MeteredDriver(AgentDriver):
         )
         self._metrics.record(result)
         return result
+
+    def agent_model(self, agent_name: str) -> str | None:
+        # Not a driver call — delegate without recording metrics.
+        return self._inner.agent_model(agent_name)

@@ -983,3 +983,8 @@ Plan written but not approved by human.
 
 
 **Run metrics:** 5 driver call(s), $1.3261, session 92758806-54a9-494b-983e-8eafd01e3747
+
+## 2026-10-12 — Pin Worker model and apply it to corrective retries
+
+### Done
+- Pinned `model: claude-sonnet-5-5` in `agents/worker.md`; added optional `model=` to `AgentDriver.run()` plus a non-abstract `agent_model()` (default `None`), implemented in `ClaudeDriver` (shared `_model_args` helper builds `--model` for both `run` and `run_subagent`) and forwarded by `_MeteredDriver`; `_run_task_checks` resolves the Worker's model once and threads it to all three corrective `driver.run()` calls. 269 tests passing, diff coverage 100%, `ruff`/`pyright` clean.

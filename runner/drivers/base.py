@@ -24,8 +24,12 @@ class AgentDriver(ABC):
         prompt: str,
         context_files: list[str] | None = None,
         cwd: Path | None = None,
+        model: str | None = None,
     ) -> AgentResult:
-        """Send a prompt, return the result. cwd sets the working directory for the agent process."""
+        """
+        Send a prompt, return the result. cwd sets the working directory for the agent process.
+        When model is set, the call runs on that model; None keeps the tool's default.
+        """
         ...
 
     @abstractmethod
@@ -42,3 +46,10 @@ class AgentDriver(ABC):
         sub-agent mechanism. cwd sets the working directory for the agent process.
         """
         ...
+
+    def agent_model(self, agent_name: str) -> str | None:
+        """
+        Return the model an agent definition pins, so plain run() calls on behalf
+        of that agent can use the same model. None when no model is pinned.
+        """
+        return None

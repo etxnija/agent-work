@@ -38,6 +38,7 @@ from runner.loop import (
     _run_review_with_retry,
     _run_sensors,
     _run_sensors_with_retry,
+    _run_task_checks,
     _show_diff_in_editor,
     _squash_subject,
     _stamp_verified,
@@ -463,7 +464,7 @@ class TestRunSensorsWithRetry:
         lint = sensors / "lint.sh"
         lint.write_text("#!/bin/sh\necho 'lint error' >&2\nexit 1\n")
 
-        def worker_fixes_lint(prompt, context_files, cwd=None):
+        def worker_fixes_lint(prompt, context_files, cwd=None, model=None):
             lint.write_text("#!/bin/sh\nexit 0\n")
             return _ok()
 
@@ -499,7 +500,7 @@ class TestRunSensorsWithRetry:
         a_lint.write_text("#!/bin/sh\necho 'a failed'\nexit 1\n")
         b_test.write_text("#!/bin/sh\necho 'b failed'\nexit 1\n")
 
-        def fix_currently_reported(prompt, context_files, cwd=None):
+        def fix_currently_reported(prompt, context_files, cwd=None, model=None):
             if "a_lint.sh" in prompt:
                 a_lint.write_text("#!/bin/sh\nexit 0\n")
             elif "b_test.sh" in prompt:
@@ -663,6 +664,49 @@ class TestRunReviewWithRetry:
         assert failures == []
         assert driver.run.call_count == 1
         assert review_critiques[1] == "Fix the thing."
+
+
+class TestRunTaskChecksWorkerModel:
+    """Every corrective driver.run() call uses the model the Worker definition pins."""
+
+    CASES: ClassVar[list] = [
+        pytest.param(
+            [[("lint.sh", "bad")], []], [[]], [REVIEW_APPROVED_SIGNAL],
+            id="sensor_retry",
+        ),
+        pytest.param(
+            [[]], [["foo.py: bar — NLOC 60 exceeds threshold 50"], []], [REVIEW_APPROVED_SIGNAL],
+            id="code_health_retry",
+        ),
+        pytest.param(
+            [[], []], [[]], [f"{REVIEW_CHANGES_SIGNAL}\nFix it.", REVIEW_APPROVED_SIGNAL],
+            id="review_correction",
+        ),
+    ]
+
+    @pytest.mark.parametrize("sensor_results,health_results,review_texts", CASES)
+    def test_corrective_call_uses_worker_model(
+        self, tmp_path, sensor_results, health_results, review_texts
+    ):
+        driver = MagicMock()
+        driver.agent_model.return_value = "claude-sonnet-5-5"
+        driver.run.return_value = _ok()
+        driver.run_subagent.side_effect = [_ok(text) for text in review_texts]
+        handle = MagicMock(path=tmp_path)
+
+        with patch("runner.loop._run_sensors", side_effect=sensor_results), \
+             patch("runner.loop.check_code_health", side_effect=health_results), \
+             patch("runner.loop._task_diff", return_value=""):
+            findings, failures = _run_task_checks(
+                driver, handle, 1, 1, "task text",
+                "plan.md", "AGENTS.md", "memory/status.md", ["AGENTS.md"], {},
+            )
+
+        assert findings == []
+        assert failures == []
+        driver.agent_model.assert_called_once_with(WORKER_AGENT)
+        assert driver.run.call_count == 1
+        assert driver.run.call_args.kwargs["model"] == "claude-sonnet-5-5"
 
 
 # ── Planner failures ──────────────────────────────────────────────────────────
@@ -2429,7 +2473,7 @@ class TestOfferMerge:
         driver = MagicMock()
         driver.run_subagent.return_value = _ok(PLAN_READY_SIGNAL)
 
-        def worker_side_effect(prompt, context_files, cwd=None):
+        def worker_side_effect(prompt, context_files, cwd=None, model=None):
             status = tmp_path / "memory" / "status.md"
             status.write_text(status.read_text() + "- done\n")
             return _ok()

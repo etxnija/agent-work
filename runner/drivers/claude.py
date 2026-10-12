@@ -62,6 +62,11 @@ def _parse_result_json(stdout: str) -> tuple[str, float | None, str | None]:
     return parsed.get("result", ""), parsed.get("total_cost_usd"), parsed.get("session_id")
 
 
+def _model_args(model: str | None) -> list[str]:
+    """Return the `--model` CLI flag for model, or [] when model is None/empty."""
+    return ["--model", model] if model else []
+
+
 def _inject_context(prompt: str, context_files: list[str]) -> str:
     """
     Prepend the contents of context_files into the prompt.
@@ -90,6 +95,7 @@ class ClaudeDriver(AgentDriver):
         prompt: str,
         context_files: list[str] | None = None,
         cwd: Path | None = None,
+        model: str | None = None,
     ) -> AgentResult:
         context_files = context_files or []
         full_prompt = _inject_context(prompt, context_files)
@@ -98,7 +104,7 @@ class ClaudeDriver(AgentDriver):
                 "claude", "--print", "--dangerously-skip-permissions",
                 "--output-format", "json",
                 full_prompt,
-            ],
+            ] + _model_args(model),
             capture_output=True,
             text=True,
             cwd=cwd,
@@ -106,6 +112,10 @@ class ClaudeDriver(AgentDriver):
         )
         text, cost_usd, session_id = _parse_result_json(result.stdout)
         return AgentResult(text=text, exit_code=result.returncode, cost_usd=cost_usd, session_id=session_id)
+
+    def agent_model(self, agent_name: str) -> str | None:
+        _, _, model = _load_agent_definition(agent_name)
+        return model
 
     def run_subagent(
         self,
@@ -157,8 +167,7 @@ class ClaudeDriver(AgentDriver):
                 full_prompt,
             ]
 
-        if model:
-            cmd += ["--model", model]
+        cmd += _model_args(model)
 
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=False)
         text, cost_usd, session_id = _parse_result_json(result.stdout)

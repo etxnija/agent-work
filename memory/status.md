@@ -1020,3 +1020,6 @@ Plan written but not approved by human.
 
 - Run metrics now land in the squash-merge commit (`_run_metrics_entry`, `metrics_entry` on `_perform_squash_merge`/`_offer_merge`); separate "Record run metrics" commit only for non-merged outcomes. Tests in `TestRunMetricsInSquashCommit`.
 - Docs: updated the AGENTS.md gotcha and `memory/concepts/metrics.md` to say merged runs carry the metrics line in the squash commit, while other outcomes and plan-rejected are committed on their own.
+
+
+**Run metrics:** 13 driver call(s), $1.4643, session 30a64c0e-0859-492d-88c4-fe31b414f1c5, cache read 1635423 / write 338547 / input 114 (share 83%)

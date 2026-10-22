@@ -664,6 +664,50 @@ def _write_last_run_state(project_root: Path, branch: str, worktree: Path) -> No
     (project_root / ".agent-last-run.json").write_text(json.dumps(state, indent=2))
 
 
+def _clear_last_run_state_if_matches(project_root: Path, branch: str) -> None:
+    """
+    Remove .agent-last-run.json when it points at `branch`. Called once the
+    harness has deleted that branch itself, so the file never names a branch
+    that no longer exists. A file for a different branch is left alone.
+    """
+    state_file = project_root / ".agent-last-run.json"
+    if not state_file.exists():
+        return
+    try:
+        state = json.loads(state_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+    if isinstance(state, dict) and state.get("branch") == branch:
+        state_file.unlink()
+
+
+def _clear_stale_last_run_state(project_root: Path) -> None:
+    """
+    Remove .agent-last-run.json at the start of a run when the branch it names
+    no longer exists (e.g. deleted by hand), so it never points at nothing.
+    """
+    state_file = project_root / ".agent-last-run.json"
+    try:
+        state = json.loads(state_file.read_text())
+    except (ValueError, OSError):
+        return
+    branch = state.get("branch") if isinstance(state, dict) else None
+    if not branch:
+        return
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        state_file.unlink()
+        logger.info(
+            f"[cleanup] Removed stale .agent-last-run.json (branch '{branch}' no longer exists)."
+        )
+
+
 # ── Merge helper ─────────────────────────────────────────────────────────────
 
 def _branch_commits(branch: str, project_root: Path) -> list[str]:
@@ -814,10 +858,21 @@ def _perform_squash_merge(branch: str, project_root: Path, task: str, commits: l
         check=False,
     )
     if commit.returncode == 0:
-        subprocess.run(
-            ["git", "branch", "-D", branch], cwd=project_root, capture_output=True, check=False
+        delete = subprocess.run(
+            ["git", "branch", "-D", branch],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            check=False,
         )
-        logger.info(f"[merge] Done. Squashed into one commit; branch '{branch}' deleted.")
+        if delete.returncode == 0:
+            _clear_last_run_state_if_matches(project_root, branch)
+            logger.info(f"[merge] Done. Squashed into one commit; branch '{branch}' deleted.")
+        else:
+            logger.info(
+                f"[merge] Done. Squashed into one commit; branch '{branch}' "
+                f"could not be deleted: {delete.stderr.strip()}"
+            )
         return "merged"
 
     logger.info(f"[merge] Commit failed: {commit.stderr.strip()}")
@@ -1291,6 +1346,7 @@ def run_loop(task: str) -> int:
     log_path = logs_dir / f"run-{run_timestamp}.log"
 
     with _log_handlers(log_path):
+        _clear_stale_last_run_state(project_root)
         exit_code = _generate_plan(driver, task)
         if exit_code != 0:
             return exit_code

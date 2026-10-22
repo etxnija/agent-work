@@ -1000,3 +1000,4 @@ Plan written but not approved by human.
 
 
 **Run metrics:** 3 driver call(s), $0.8339, session c28c8398-e5e0-484e-8d77-5390d8389727
+- Task 2: added `_clear_stale_last_run_state()` in `runner/loop.py`, called first inside `_log_handlers` in `run_loop()`; removes `.agent-last-run.json` (and logs `[cleanup]`) when its branch no longer exists; `test_stale_last_run_state_removed_when_branch_missing` and `test_last_run_state_kept_when_branch_exists` cover the missing and existing branch cases; the parametrized `test_stale_cleanup_leaves_unusable_state_in_place` covers unusable state contents.

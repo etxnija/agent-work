@@ -24,6 +24,8 @@ from runner.loop import (
     SENSOR_RETRY_LIMIT,
     WORKER_AGENT,
     _branch_commits,
+    _clear_last_run_state_if_matches,
+    _clear_stale_last_run_state,
     _commit_status_update,
     _commit_task,
     _log_handlers,
@@ -1118,6 +1120,41 @@ class TestRunLoopPerTask:
         assert state_file.exists()
         assert json.loads(state_file.read_text())["branch"] == "agent/fake-branch"
 
+    def _run_with_state_for_branch(self, tmp_path, monkeypatch, branch, with_branch):
+        _make_project(tmp_path)
+        _init_repo(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(SINGLE_TASK_PLAN)
+        if with_branch:
+            _make_branch_with_commit(tmp_path, branch, "work")
+        (tmp_path / ".agent-last-run.json").write_text(json.dumps({"branch": branch}))
+
+        gate = MagicMock()
+        gate.request.return_value = False
+        fake_sandbox = _FakeBranchSandbox(tmp_path, "agent/fake-branch")
+
+        with patch("runner.loop.get_driver", return_value=MagicMock()), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=fake_sandbox), \
+             patch("runner.loop._generate_plan", return_value=0):
+            return run_loop("task")
+
+    def test_stale_last_run_state_removed_when_branch_missing(self, tmp_path, monkeypatch, caplog):
+        with caplog.at_level(logging.INFO, logger="agent_loop"):
+            code = self._run_with_state_for_branch(tmp_path, monkeypatch, "agent/gone", False)
+
+        assert code == 2
+        assert not (tmp_path / ".agent-last-run.json").exists()
+        assert any("[cleanup] Removed stale" in m for m in caplog.messages)
+
+    def test_last_run_state_kept_when_branch_exists(self, tmp_path, monkeypatch):
+        code = self._run_with_state_for_branch(tmp_path, monkeypatch, "agent/kept", True)
+
+        assert code == 2
+        state_file = tmp_path / ".agent-last-run.json"
+        assert state_file.exists()
+        assert json.loads(state_file.read_text())["branch"] == "agent/kept"
+
 
 # ── Sensor retry wiring ──────────────────────────────────────────────────────
 
@@ -2112,6 +2149,84 @@ class TestWriteLastRunState:
 
         state = json.loads((tmp_path / ".agent-last-run.json").read_text())
         assert state["branch"] == "agent/second-branch"
+
+    def test_clear_deletes_file_when_branch_matches(self, tmp_path):
+        _init_repo(tmp_path)
+        _write_last_run_state(tmp_path, "agent/feat", tmp_path)
+
+        _clear_last_run_state_if_matches(tmp_path, "agent/feat")
+
+        assert not (tmp_path / ".agent-last-run.json").exists()
+
+    def test_clear_keeps_file_for_different_branch(self, tmp_path):
+        _init_repo(tmp_path)
+        _write_last_run_state(tmp_path, "agent/other", tmp_path)
+
+        _clear_last_run_state_if_matches(tmp_path, "agent/feat")
+
+        state_file = tmp_path / ".agent-last-run.json"
+        assert state_file.exists()
+        assert json.loads(state_file.read_text())["branch"] == "agent/other"
+
+    def test_clear_is_noop_when_file_missing(self, tmp_path):
+        _clear_last_run_state_if_matches(tmp_path, "agent/feat")
+
+        assert not (tmp_path / ".agent-last-run.json").exists()
+
+    def test_clear_leaves_corrupt_file_in_place(self, tmp_path):
+        state_file = tmp_path / ".agent-last-run.json"
+        state_file.write_text("{not json")
+
+        _clear_last_run_state_if_matches(tmp_path, "agent/feat")
+
+        assert state_file.read_text() == "{not json"
+
+    @pytest.mark.parametrize("content", ["[]", '"x"', "null", "42"])
+    def test_clear_leaves_non_object_json_in_place(self, tmp_path, content):
+        state_file = tmp_path / ".agent-last-run.json"
+        state_file.write_text(content)
+
+        _clear_last_run_state_if_matches(tmp_path, "agent/feat")
+
+        assert state_file.read_text() == content
+
+    @pytest.mark.parametrize(
+        "content",
+        [b"{not json", b"[]", b"null", b"{}", b'{"branch": ""}', b'{"branch": null}', b"\xff\xfe\x00bin"],
+    )
+    def test_stale_cleanup_leaves_unusable_state_in_place(self, tmp_path, content):
+        _init_repo(tmp_path)
+        state_file = tmp_path / ".agent-last-run.json"
+        state_file.write_bytes(content)
+
+        _clear_stale_last_run_state(tmp_path)
+
+        assert state_file.read_bytes() == content
+
+    def test_squash_merge_keeps_state_when_branch_delete_fails(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_repo(repo)
+        _make_branch_with_file_commit(repo, "agent/feat", "Task 1: add file")
+        # A branch checked out in another worktree cannot be deleted.
+        subprocess.run(["git", "worktree", "add", str(tmp_path / "wt"), "agent/feat"],
+                       cwd=repo, capture_output=True, check=True)
+        _write_last_run_state(repo, "agent/feat", repo)
+
+        outcome = _perform_squash_merge("agent/feat", repo, "add file", ["Task 1: add file"])
+
+        assert outcome == "merged"
+        assert (repo / ".agent-last-run.json").exists()
+
+    def test_squash_merge_clears_state_for_deleted_branch(self, tmp_path):
+        _init_repo(tmp_path)
+        _make_branch_with_file_commit(tmp_path, "agent/feat", "Task 1: add file")
+        _write_last_run_state(tmp_path, "agent/feat", tmp_path)
+
+        outcome = _perform_squash_merge("agent/feat", tmp_path, "add file", ["Task 1: add file"])
+
+        assert outcome == "merged"
+        assert not (tmp_path / ".agent-last-run.json").exists()
 
 
 class TestMainCheckoutDirtyPaths:

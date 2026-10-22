@@ -997,3 +997,6 @@ Plan written but not approved by human.
 ### Done
 - `_parse_result_json()` now returns a 4th element (`_Usage` NamedTuple: input / cache-read / cache-write, each `int | None`, bool rejected); `AgentResult` gained `input_tokens`, `cache_read_tokens`, `cache_write_tokens`; `Metrics` gained run-total counters, a per-label `by_label` breakdown (`LabelMetrics`) and `cache_read_share()`; `_MeteredDriver` labels calls by agent name / `"corrective"`; `_finalize_run` logs `[metrics] Run cache:` plus per-label lines and extends the `**Run metrics:**` status line. 292 tests passing, diff coverage 100%, lint/lsp clean.
 - Verified against the real CLI (`claude --print --output-format json`): top-level snake_case `usage` with `input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` as expected, plus a separate camelCase `modelUsage`. `usage` is cumulative over all turns of the session (a 3-turn run showed cache_read 29706 in `usage` vs 20848 in its single `iterations` entry).
+
+
+**Run metrics:** 3 driver call(s), $0.8339, session c28c8398-e5e0-484e-8d77-5390d8389727

@@ -102,9 +102,9 @@ def _file_hash(path: str) -> str | None:
     return hashlib.md5(p.read_bytes()).hexdigest() if p.exists() else None
 
 
-def _append_status(entry: str) -> None:
-    """Append an entry to status.md if it exists."""
-    p = Path(STATUS_MD)
+def _append_status(entry: str, status_path: Path = Path(STATUS_MD)) -> None:
+    """Append an entry to status.md (or status_path) if it exists."""
+    p = status_path
     if p.exists():
         p.write_text(p.read_text() + "\n" + entry)
 
@@ -623,7 +623,7 @@ def _commit_task(task_num: int, title: str, worktree: Path) -> None:
 
 
 def _commit_status_update(message: str, project_root: Path) -> None:
-    """Commit only memory/status.md in project_root. Scoped strictly to that file."""
+    """Commit only memory/status.md in project_root. Anything else staged stays staged."""
     subprocess.run(
         ["git", "add", "memory/status.md"],
         cwd=project_root,
@@ -633,7 +633,7 @@ def _commit_status_update(message: str, project_root: Path) -> None:
     )
 
     commit = subprocess.run(
-        ["git", "commit", "-m", message],
+        ["git", "commit", "-m", message, "--", "memory/status.md"],
         cwd=project_root,
         capture_output=True,
         text=True,
@@ -816,8 +816,19 @@ def _stamp_verified(path: Path) -> None:
     path.write_text(f"---{frontmatter}\n---{parts[2]}")
 
 
-def _perform_squash_merge(branch: str, project_root: Path, task: str, commits: list[str]) -> str:
-    """Squash branch's commits into one commit on the current branch, deleting branch on success."""
+def _perform_squash_merge(
+    branch: str,
+    project_root: Path,
+    task: str,
+    commits: list[str],
+    metrics_entry: str | None = None,
+) -> str:
+    """
+    Squash branch's commits into one commit on the current branch, deleting branch on success.
+
+    If metrics_entry is given, it is appended to memory/status.md and staged so it
+    lands in the squash commit; a failed commit restores the squash-staged state.
+    """
     squash = subprocess.run(
         ["git", "merge", "--squash", branch],
         cwd=project_root,
@@ -850,6 +861,13 @@ def _perform_squash_merge(branch: str, project_root: Path, task: str, commits: l
         body = f"{body}\n\n{task.strip()}"
     commit_msg = f"{subject}\n\n{body}"
 
+    status_path = project_root / STATUS_MD
+    original_status: str | None = None
+    if metrics_entry and status_path.exists():
+        original_status = status_path.read_text()
+        status_path.write_text(original_status + "\n" + metrics_entry)
+        subprocess.run(["git", "add", STATUS_MD], cwd=project_root, capture_output=True, check=False)
+
     commit = subprocess.run(
         ["git", "commit", "-m", commit_msg],
         cwd=project_root,
@@ -857,6 +875,9 @@ def _perform_squash_merge(branch: str, project_root: Path, task: str, commits: l
         text=True,
         check=False,
     )
+    if commit.returncode != 0 and original_status is not None:
+        status_path.write_text(original_status)
+        subprocess.run(["git", "add", STATUS_MD], cwd=project_root, capture_output=True, check=False)
     if commit.returncode == 0:
         delete = subprocess.run(
             ["git", "branch", "-D", branch],
@@ -887,6 +908,7 @@ def _offer_merge(
     critiques: dict[int, str] | None = None,
     narrative_path: Path | None = None,
     code_health_issues: dict[int, list[str]] | None = None,
+    metrics_entry: str | None = None,
 ) -> str:
     """
     Show commits on branch and offer a squash-merge into HEAD.
@@ -931,7 +953,7 @@ def _offer_merge(
         logger.info(f"  git merge --squash {branch} && git commit && git branch -D {branch}")
         return "declined"
 
-    return _perform_squash_merge(branch, project_root, task, commits)
+    return _perform_squash_merge(branch, project_root, task, commits, metrics_entry)
 
 
 def _update_coverage_baseline(project_root: Path) -> None:
@@ -1233,6 +1255,16 @@ def _format_share(share: float | None) -> str:
     return "n/a" if share is None else f"{share:.0%}"
 
 
+def _run_metrics_entry(run_metrics: Metrics) -> str:
+    return (
+        f"\n**Run metrics:** {run_metrics.calls} driver call(s), "
+        f"${run_metrics.cost_usd:.4f}, session {run_metrics.last_session_id}"
+        f", cache read {run_metrics.cache_read_tokens} / write {run_metrics.cache_write_tokens}"
+        f" / input {run_metrics.input_tokens} "
+        f"(share {_format_share(run_metrics.cache_read_share())})\n"
+    )
+
+
 def _finalize_run(
     task: str,
     project_root: Path,
@@ -1242,7 +1274,10 @@ def _finalize_run(
     code_health_issues: dict[int, list[str]],
     run_metrics: Metrics,
 ) -> None:
-    """Offer a merge, and print/append final metrics."""
+    """Offer a merge, and print/append final metrics (in the squash commit when merged)."""
+    outcome: str | None = None
+    # Metrics must be final here: the entry is carried into the squash commit as-is.
+    entry = _run_metrics_entry(run_metrics)
     if handle.branch:  # "" when NoopSandbox is active (tests / no-git projects)
         outcome = _offer_merge(
             handle.branch,
@@ -1251,6 +1286,7 @@ def _finalize_run(
             review_critiques,
             narrative_path=log_path,
             code_health_issues=code_health_issues,
+            metrics_entry=entry,
         )
         _append_log_outcome(log_path, outcome)
         if outcome == "merged":
@@ -1272,14 +1308,9 @@ def _finalize_run(
             f"read {bucket.cache_read_tokens}, write {bucket.cache_write_tokens}, "
             f"input {bucket.input_tokens}, share {_format_share(bucket.cache_read_share())}"
         )
-    _append_status(
-        f"\n**Run metrics:** {run_metrics.calls} driver call(s), "
-        f"${run_metrics.cost_usd:.4f}, session {run_metrics.last_session_id}"
-        f", cache read {run_metrics.cache_read_tokens} / write {run_metrics.cache_write_tokens}"
-        f" / input {run_metrics.input_tokens} "
-        f"(share {_format_share(run_metrics.cache_read_share())})\n"
-    )
-    _commit_status_update("Record run metrics", project_root)
+    if outcome != "merged":
+        _append_status(entry, project_root / STATUS_MD)
+        _commit_status_update("Record run metrics", project_root)
 
 
 def _implement_tasks(

@@ -28,6 +28,7 @@ from runner.loop import (
     _clear_stale_last_run_state,
     _commit_status_update,
     _commit_task,
+    _finalize_run,
     _log_handlers,
     _main_checkout_dirty_paths,
     _offer_merge,
@@ -37,6 +38,7 @@ from runner.loop import (
     _plan_invalid_reason,
     _review_verdict,
     _run_code_health_with_retry,
+    _run_metrics_entry,
     _run_review_with_retry,
     _run_sensors,
     _run_sensors_with_retry,
@@ -54,6 +56,7 @@ from runner.loop import (
 from runner.loop import (
     logger as loop_logger,
 )
+from runner.metrics import Metrics
 from runner.sandbox.base import WorkspaceHandle
 from runner.sandbox.noop import NoopSandbox
 
@@ -3090,3 +3093,192 @@ class TestConceptIndex:
 
         missing = [name for name in concept_files if name not in index_text]
         assert not missing, f"memory/concepts/index.md is missing links for: {missing}"
+
+
+# ── Run metrics carried in the squash-merge commit ────────────────────────────
+
+_GIT_ENV = {"GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+            "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True,
+        env={**os.environ, **_GIT_ENV},
+    ).stdout
+
+
+def _metrics_repo(tmp_path: Path) -> Path:
+    """Repo with a committed memory/status.md on the default branch."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_repo(repo)
+    (repo / "memory").mkdir()
+    (repo / "memory" / "status.md").write_text("# Status\n")
+    _git(repo, "add", "memory")
+    _git(repo, "commit", "-m", "add status")
+    return repo
+
+
+def _branch_with_change(repo: Path, branch: str, status_line: str | None = None) -> None:
+    _git(repo, "checkout", "-b", branch)
+    (repo / "change.txt").write_text("change")
+    _git(repo, "add", "change.txt")
+    if status_line is not None:
+        status = repo / "memory" / "status.md"
+        status.write_text(status.read_text() + status_line)
+        _git(repo, "add", "memory/status.md")
+    _git(repo, "commit", "-m", "Task 1: change")
+    _git(repo, "checkout", "-")
+
+
+def _populated_metrics() -> Metrics:
+    m = Metrics()
+    m.calls = 3
+    m.cost_usd = 1.5
+    m.last_session_id = "sess-x"
+    return m
+
+
+def _run_finalize(
+    repo: Path, tmp_path: Path, branch: str, answer: str, monkeypatch, cwd: Path | None = None
+) -> None:
+    monkeypatch.chdir(cwd or repo)
+    monkeypatch.delenv("ZELLIJ", raising=False)
+    log_path = tmp_path / "run.log"
+    log_path.write_text("log\n")
+    with patch("builtins.input", return_value=answer), \
+         patch("runner.loop._update_coverage_baseline"):
+        _finalize_run(
+            "task", repo, log_path, WorkspaceHandle(path=repo, branch=branch),
+            {}, {}, _populated_metrics(),
+        )
+
+
+def _commit_count(repo: Path) -> int:
+    return int(_git(repo, "rev-list", "--count", "HEAD").strip())
+
+
+def _status_text(repo: Path) -> str:
+    return (repo / "memory" / "status.md").read_text()
+
+
+class TestRunMetricsInSquashCommit:
+    def test_merged_run_carries_metrics_in_squash_commit(self, tmp_path, monkeypatch):
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+        before = _commit_count(repo)
+
+        _run_finalize(repo, tmp_path, "agent/feat", "y", monkeypatch)
+
+        assert _commit_count(repo) == before + 1
+        assert "**Run metrics:**" in _git(repo, "show", "HEAD", "--", "memory/status.md")
+        assert "Record run metrics" not in _git(repo, "log", "--format=%s")
+        assert _git(repo, "status", "--porcelain").strip() == ""
+
+    def test_declined_run_uses_separate_metrics_commit(self, tmp_path, monkeypatch):
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+
+        _run_finalize(repo, tmp_path, "agent/feat", "n", monkeypatch)
+
+        assert _last_commit_subject(repo) == "Record run metrics"
+        assert _status_text(repo).count("**Run metrics:**") == 1
+
+    def test_squash_failed_falls_back_to_separate_commit(self, tmp_path, monkeypatch):
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+        # An untracked file the squash would overwrite makes `git merge --squash` refuse.
+        (repo / "change.txt").write_text("local")
+
+        _run_finalize(repo, tmp_path, "agent/feat", "y", monkeypatch)
+
+        assert _last_commit_subject(repo) == "Record run metrics"
+        assert _status_text(repo).count("**Run metrics:**") == 1
+
+    def test_no_commits_falls_back_to_separate_commit(self, tmp_path, monkeypatch):
+        repo = _metrics_repo(tmp_path)
+        _git(repo, "branch", "agent/empty")
+
+        _run_finalize(repo, tmp_path, "agent/empty", "y", monkeypatch)
+
+        assert _last_commit_subject(repo) == "Record run metrics"
+        assert _status_text(repo).count("**Run metrics:**") == 1
+
+    def test_branch_status_entry_precedes_metrics_once_each(self, tmp_path, monkeypatch):
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat", status_line="\n- branch entry\n")
+
+        _run_finalize(repo, tmp_path, "agent/feat", "y", monkeypatch)
+
+        text = _status_text(repo)
+        assert text.count("- branch entry") == 1
+        assert text.count("**Run metrics:**") == 1
+        assert text.index("- branch entry") < text.index("**Run metrics:**")
+        assert "Record run metrics" not in _git(repo, "log", "--format=%s")
+
+    def test_commit_failure_restores_status_and_staged_state(self, tmp_path):
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+        hook = repo / ".git" / "hooks" / "commit-msg"
+        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.chmod(0o755)
+        entry = _run_metrics_entry(_populated_metrics())
+
+        outcome = _perform_squash_merge(
+            "agent/feat", repo, "task", ["Task 1: change"], metrics_entry=entry
+        )
+
+        assert outcome == "commit failed"
+        assert "**Run metrics:**" not in _status_text(repo)
+        staged = _git(repo, "diff", "--cached", "--name-only").split()
+        assert staged == ["change.txt"]
+
+    def test_finalize_after_commit_failure_records_metrics_once(self, tmp_path, monkeypatch):
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+        # Reject the squash commit but let the fallback "Record run metrics" commit through.
+        hook = repo / ".git" / "hooks" / "commit-msg"
+        hook.write_text('#!/bin/sh\ngrep -q "Record run metrics" "$1" && exit 0\nexit 1\n')
+        hook.chmod(0o755)
+
+        _run_finalize(repo, tmp_path, "agent/feat", "y", monkeypatch)
+
+        assert _status_text(repo).count("**Run metrics:**") == 1
+        assert _last_commit_subject(repo) == "Record run metrics"
+        # Fallback commit is scoped to status.md; the failed squash stays staged, not committed.
+        assert _git(repo, "show", "HEAD", "--name-only", "--format=").split() == ["memory/status.md"]
+        assert "change.txt" in _git(repo, "diff", "--cached", "--name-only")
+
+    @pytest.mark.parametrize("answer", ["y", "n"])
+    def test_status_path_independent_of_cwd(self, tmp_path, monkeypatch, answer):
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+        elsewhere = tmp_path / "elsewhere"
+        (elsewhere / "memory").mkdir(parents=True)
+        (elsewhere / "memory" / "status.md").write_text("# Other\n")
+
+        _run_finalize(repo, tmp_path, "agent/feat", answer, monkeypatch, cwd=elsewhere)
+
+        assert _status_text(repo).count("**Run metrics:**") == 1
+        assert "**Run metrics:**" not in (elsewhere / "memory" / "status.md").read_text()
+
+    def test_squash_without_metrics_entry_leaves_status_untouched(self, tmp_path):
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+
+        outcome = _perform_squash_merge("agent/feat", repo, "task", ["Task 1: change"])
+
+        assert outcome == "merged"
+        assert _git(repo, "show", "HEAD", "--name-only", "--format=").split() == ["change.txt"]
+
+    def test_run_metrics_entry_text(self):
+        m = _populated_metrics()
+        m.cache_read_tokens = 80
+        m.cache_write_tokens = 10
+        m.input_tokens = 10
+        assert _run_metrics_entry(m) == (
+            "\n**Run metrics:** 3 driver call(s), $1.5000, session sess-x"
+            ", cache read 80 / write 10 / input 10 (share 80%)\n"
+        )
+        assert _run_metrics_entry(Metrics()).endswith("(share n/a)\n")

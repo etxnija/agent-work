@@ -4,7 +4,7 @@ tags: [metrics, cost, session, telemetry]
 summary: Driver call accounting, cost tracking, and session ID recording across all agent operations.
 links: [docs/arch/adr/0012-metrics-metered-driver-wrapper.md]
 updated: 2026-10-22
-verified: [{ by: "human", at: 2026-10-22 }]
+verified: [{ by: "human", at: 2026-10-22 }, { by: "human", at: 2026-10-22 }]
 ---
 
 # Driver Metrics & Cost Tracking
@@ -19,7 +19,7 @@ Scaling autonomous loops requires real-time visibility into API call frequency a
 - **Labels:** `_MeteredDriver.run_subagent()` records under the agent name; `run()` records under `"corrective"` (`CORRECTIVE_LABEL`), since plain `run()` is only used for corrective retries.
 - **Cache-read share:** `cache_read / (cache_read + cache_write + input_tokens)`; `None` (rendered `n/a`) when the denominator is 0, so "no data" is never shown as 0%.
 - **Per-Task Snapshotting:** In `runner/loop.py`, the loop snapshots `calls` and `cost_usd` before and after each task, logging per-task spend (`[metrics] Task i/N: X call(s), $Y.YY`).
-- **Run-Total Reporting:** At loop completion, the total driver call count and dollar spend are printed to console and appended to `memory/status.md`, followed by a `[metrics] Run cache:` line and one sorted line per label; the status line ends with `, cache read N / write N / input N (share X%)`. Per-task lines carry no cache data.
+- **Run-Total Reporting:** At loop completion, the total driver call count and dollar spend are printed to console and appended to `memory/status.md`, followed by a `[metrics] Run cache:` line and one sorted line per label; the status line ends with `, cache read N / write N / input N (share X%)`. Per-task lines carry no cache data. On a merged run the status line is built by `_run_metrics_entry()` (the single source of that text) and carried inside the squash commit (`_perform_squash_merge(..., metrics_entry=)`); only non-merged outcomes (declined, squash failed, no commits, commit failed, no branch) get the separate `Record run metrics` commit. A failed squash commit restores status.md to its pre-metrics text so the fallback never records it twice.
 
 ## Gotchas & Failure Modes
 - **Sub-Agent Call Attribution:** Planner and standalone review calls accumulate in total run metrics but are not attributed to individual task iterations.

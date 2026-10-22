@@ -1014,3 +1014,6 @@ Plan written but not approved by human.
 
 ### Done
 - Added `TestBootstrapAgentsMdLangContent`: `LANG_TESTING[lang]` appears verbatim for go/typescript/python, and `LANG_PATTERNS["go"]` appears verbatim for go.
+
+
+**Run metrics:** 5 driver call(s), $0.6120, session 9d9c3f08-4c25-4351-b36d-ff180da6c9f6, cache read 514062 / write 101930 / input 42 (share 83%)

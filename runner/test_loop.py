@@ -1592,6 +1592,64 @@ class TestRunLoopMetricsSummary:
 
         status_text = (tmp_path / "memory" / "status.md").read_text()
         assert "**Run metrics:** 6 driver call(s), $0.0000, session sess-review" in status_text
+        # No token data from the fake driver: share renders as n/a, not 0%.
+        assert (
+            "[metrics] Run cache: read 0, write 0, uncached input 0 tokens, cache-read share n/a"
+            in caplog.messages
+        )
+        assert "cache read 0 / write 0 / input 0 (share n/a)" in status_text
+
+    def test_cache_usage_reported_in_log_and_status(self, tmp_path, monkeypatch, caplog):
+        _make_project(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "plan.md").write_text(MINIMAL_PLAN)
+
+        def tokens(read, write, input_tokens, session_id=None, text=""):
+            return AgentResult(
+                text=text, exit_code=0, session_id=session_id, input_tokens=input_tokens,
+                cache_read_tokens=read, cache_write_tokens=write,
+            )
+
+        def run_subagent_side_effect(agent_name, prompt, *args, **kwargs):
+            if agent_name == REVIEWER_AGENT:
+                return tokens(600, 0, 0, "sess-review", REVIEW_APPROVED_SIGNAL)
+            if agent_name == WORKER_AGENT:
+                status = tmp_path / "memory" / "status.md"
+                status.write_text(status.read_text() + "- done\n")
+                return tokens(100, 200, 100)
+            return tokens(0, 0, 0, text=PLAN_READY_SIGNAL)
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = run_subagent_side_effect
+        driver.run.return_value = _ok()
+        gate = MagicMock()
+        gate.request.return_value = True
+
+        with patch("runner.loop.get_driver", return_value=driver), \
+             patch("runner.loop.get_gate", return_value=gate), \
+             patch("runner.loop.get_sandbox", return_value=NoopSandbox()), \
+             patch("runner.loop._run_sensors", return_value=[]), \
+             patch("runner.loop._commit_task"):
+            code = run_loop("task")
+
+        assert code == 0
+        # 2 tasks: worker read/write/input = 100/200/100 each, reviewer 600/0/0 each.
+        # Totals: read 1400, write 400, input 200 -> share 1400/2000 = 70%.
+        assert (
+            "[metrics] Run cache: read 1400, write 400, uncached input 200 tokens, "
+            "cache-read share 70%"
+        ) in caplog.messages
+        label_lines = [m for m in caplog.messages if m.startswith("[metrics]   ")]
+        assert label_lines == [
+            "[metrics]   planner: 1 call(s), $0.0000, read 0, write 0, input 0, share n/a",
+            "[metrics]   reviewer: 2 call(s), $0.0000, read 1200, write 0, input 0, share 100%",
+            "[metrics]   worker: 2 call(s), $0.0000, read 200, write 400, input 200, share 25%",
+        ]
+        status_text = (tmp_path / "memory" / "status.md").read_text()
+        assert (
+            "**Run metrics:** 5 driver call(s), $0.0000, session sess-review"
+            ", cache read 1400 / write 400 / input 200 (share 70%)"
+        ) in status_text
 
     def test_run_metrics_leave_no_dirty_status_md(self, tmp_path, monkeypatch):
         _init_repo(tmp_path)

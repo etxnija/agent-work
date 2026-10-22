@@ -13,6 +13,7 @@ from runner.drivers.claude import (
     _load_agent_definition,
     _parse_frontmatter,
     _parse_result_json,
+    _Usage,
 )
 
 # ── _parse_frontmatter ────────────────────────────────────────────────────────
@@ -123,31 +124,75 @@ class TestLoadAgentDefinition:
 # ── _parse_result_json ────────────────────────────────────────────────────────
 
 class TestParseResultJson:
+    NO_USAGE = _Usage(None, None, None)
     CASES: ClassVar[list] = [
         pytest.param(
             '{"result": "response text", "total_cost_usd": 0.0123, "session_id": "sess-1"}',
-            ("response text", 0.0123, "sess-1"),
+            ("response text", 0.0123, "sess-1", NO_USAGE),
             id="numeric_total_cost_usd",
         ),
         pytest.param(
             '{"result": "response text", "total_cost_usd": null, "session_id": "sess-2"}',
-            ("response text", None, "sess-2"),
+            ("response text", None, "sess-2", NO_USAGE),
             id="null_total_cost_usd",
         ),
         pytest.param(
             '{"result": "response text", "total_cost_usd": 0.02}',
-            ("response text", 0.02, None),
+            ("response text", 0.02, None, NO_USAGE),
             id="session_id_absent_defaults_to_none",
         ),
         pytest.param(
             "not valid json",
-            ("not valid json", None, None),
+            ("not valid json", None, None, NO_USAGE),
             id="invalid_json_falls_back_to_stripped_stdout",
         ),
         pytest.param(
             "",
-            ("", None, None),
+            ("", None, None, NO_USAGE),
             id="empty_string_falls_back_to_stripped_stdout",
+        ),
+        pytest.param(
+            "[1, 2]",
+            ("[1, 2]", None, None, NO_USAGE),
+            id="non_dict_json_falls_back_to_stripped_stdout",
+        ),
+        pytest.param(
+            '{"result": "r", "usage": {"input_tokens": 4, "cache_read_input_tokens": 29706,'
+            ' "cache_creation_input_tokens": 36839, "output_tokens": 452}}',
+            ("r", None, None, _Usage(4, 29706, 36839)),
+            id="usage_fully_present",
+        ),
+        pytest.param(
+            '{"result": "r", "usage": {"cache_read_input_tokens": 7}}',
+            ("r", None, None, _Usage(None, 7, None)),
+            id="usage_partially_present",
+        ),
+        pytest.param(
+            '{"result": "r"}',
+            ("r", None, None, NO_USAGE),
+            id="usage_absent",
+        ),
+        pytest.param(
+            '{"result": "r", "usage": [1, 2]}',
+            ("r", None, None, NO_USAGE),
+            id="usage_list_ignored",
+        ),
+        pytest.param(
+            '{"result": "r", "usage": "lots"}',
+            ("r", None, None, NO_USAGE),
+            id="usage_string_ignored",
+        ),
+        pytest.param(
+            '{"result": "r", "usage": {"input_tokens": "4", "cache_read_input_tokens": 1.5,'
+            ' "cache_creation_input_tokens": null}}',
+            ("r", None, None, NO_USAGE),
+            id="non_int_token_values_rejected",
+        ),
+        pytest.param(
+            '{"result": "r", "usage": {"input_tokens": true, "cache_read_input_tokens": false,'
+            ' "cache_creation_input_tokens": 3}}',
+            ("r", None, None, _Usage(None, None, 3)),
+            id="bool_token_values_rejected",
         ),
     ]
 
@@ -537,3 +582,50 @@ class TestClaudeDriverRunSubagent:
             ClaudeDriver().run_subagent("worker", "task")
 
         assert mock_run.call_args.kwargs["cwd"] is None
+
+
+# ── usage propagation onto AgentResult ────────────────────────────────────────
+
+class TestClaudeDriverUsage:
+    STDOUT = json.dumps({
+        "result": "ok",
+        "usage": {
+            "input_tokens": 4,
+            "cache_read_input_tokens": 29706,
+            "cache_creation_input_tokens": 36839,
+        },
+    })
+
+    @staticmethod
+    def _completed(stdout):
+        return MagicMock(stdout=stdout + "\n", returncode=0)
+
+    def test_run_copies_usage(self):
+        with patch("subprocess.run", return_value=self._completed(self.STDOUT)):
+            result = ClaudeDriver().run("p")
+
+        assert (result.input_tokens, result.cache_read_tokens, result.cache_write_tokens) == (
+            4, 29706, 36839,
+        )
+
+    def test_run_subagent_copies_usage(self, tmp_path, monkeypatch):
+        agent_dir = tmp_path / "agents"
+        agent_dir.mkdir()
+        (agent_dir / "planner.md").write_text("---\nname: planner\n---\nYou are the planner.")
+        import runner.drivers.claude as mod
+        monkeypatch.setattr(mod, "_AGENT_SEARCH_PATHS", [agent_dir])
+
+        with patch("subprocess.run", return_value=self._completed(self.STDOUT)):
+            result = ClaudeDriver().run_subagent("planner", "p")
+
+        assert (result.input_tokens, result.cache_read_tokens, result.cache_write_tokens) == (
+            4, 29706, 36839,
+        )
+
+    def test_run_without_usage_leaves_counters_none(self):
+        with patch("subprocess.run", return_value=self._completed('{"result": "ok"}')):
+            result = ClaudeDriver().run("p")
+
+        assert (result.input_tokens, result.cache_read_tokens, result.cache_write_tokens) == (
+            None, None, None,
+        )

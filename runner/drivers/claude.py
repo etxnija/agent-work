@@ -1,6 +1,7 @@
 import json
 import subprocess
 from pathlib import Path
+from typing import Any, NamedTuple
 
 from .base import AgentDriver, AgentResult
 
@@ -47,19 +48,50 @@ def _load_agent_definition(name: str) -> tuple[str | None, list[str], str | None
     return None, [], None
 
 
-def _parse_result_json(stdout: str) -> tuple[str, float | None, str | None]:
+class _Usage(NamedTuple):
+    """Token counters from the CLI's top-level `usage` object; None when unavailable."""
+    input_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+
+
+def _int_or_none(value: Any) -> int | None:
+    # bool is an int subclass; reject it explicitly.
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _parse_usage(usage: Any) -> _Usage:
+    if not isinstance(usage, dict):
+        return _Usage()
+    return _Usage(
+        input_tokens=_int_or_none(usage.get("input_tokens")),
+        cache_read_tokens=_int_or_none(usage.get("cache_read_input_tokens")),
+        cache_write_tokens=_int_or_none(usage.get("cache_creation_input_tokens")),
+    )
+
+
+def _parse_result_json(stdout: str) -> tuple[str, float | None, str | None, _Usage]:
     """
-    Parse `claude --print --output-format json` stdout into (text, cost_usd, session_id).
-    Falls back to (stdout.strip(), None, None) on invalid JSON or a non-dict payload,
-    so a malformed or empty response degrades instead of raising.
+    Parse `claude --print --output-format json` stdout into
+    (text, cost_usd, session_id, usage).
+    usage holds input / cache-read / cache-write token counts from the top-level `usage`
+    object (cumulative over all turns of the session); each is None when `usage` is
+    missing or not a dict, the key is missing, or the value is not an int (bool rejected).
+    Falls back to (stdout.strip(), None, None, all-None usage) on invalid JSON or a
+    non-dict payload, so a malformed or empty response degrades instead of raising.
     """
     try:
         parsed = json.loads(stdout)
     except json.JSONDecodeError:
-        return stdout.strip(), None, None
+        return stdout.strip(), None, None, _Usage()
     if not isinstance(parsed, dict):
-        return stdout.strip(), None, None
-    return parsed.get("result", ""), parsed.get("total_cost_usd"), parsed.get("session_id")
+        return stdout.strip(), None, None, _Usage()
+    return (
+        parsed.get("result", ""),
+        parsed.get("total_cost_usd"),
+        parsed.get("session_id"),
+        _parse_usage(parsed.get("usage")),
+    )
 
 
 def _model_args(model: str | None) -> list[str]:
@@ -110,8 +142,16 @@ class ClaudeDriver(AgentDriver):
             cwd=cwd,
             check=False,
         )
-        text, cost_usd, session_id = _parse_result_json(result.stdout)
-        return AgentResult(text=text, exit_code=result.returncode, cost_usd=cost_usd, session_id=session_id)
+        text, cost_usd, session_id, usage = _parse_result_json(result.stdout)
+        return AgentResult(
+            text=text,
+            exit_code=result.returncode,
+            cost_usd=cost_usd,
+            session_id=session_id,
+            input_tokens=usage.input_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+        )
 
     def agent_model(self, agent_name: str) -> str | None:
         _, _, model = _load_agent_definition(agent_name)
@@ -170,5 +210,13 @@ class ClaudeDriver(AgentDriver):
         cmd += _model_args(model)
 
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=False)
-        text, cost_usd, session_id = _parse_result_json(result.stdout)
-        return AgentResult(text=text, exit_code=result.returncode, cost_usd=cost_usd, session_id=session_id)
+        text, cost_usd, session_id, usage = _parse_result_json(result.stdout)
+        return AgentResult(
+            text=text,
+            exit_code=result.returncode,
+            cost_usd=cost_usd,
+            session_id=session_id,
+            input_tokens=usage.input_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+        )

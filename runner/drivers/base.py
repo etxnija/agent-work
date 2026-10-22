@@ -9,6 +9,9 @@ class AgentResult:
     exit_code: int
     cost_usd: float | None = None
     session_id: str | None = None
+    input_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
 
 
 class AgentDriver(ABC):

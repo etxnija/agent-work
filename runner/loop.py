@@ -1174,6 +1174,10 @@ def _append_log_outcome(path: Path, outcome: str) -> None:
         f.write(f"\n## Outcome\n{outcome}\n")
 
 
+def _format_share(share: float | None) -> str:
+    return "n/a" if share is None else f"{share:.0%}"
+
+
 def _finalize_run(
     task: str,
     project_root: Path,
@@ -1201,9 +1205,24 @@ def _finalize_run(
         f"[metrics] Run total: {run_metrics.calls} driver call(s), "
         f"${run_metrics.cost_usd:.4f}, session {run_metrics.last_session_id}"
     )
+    logger.info(
+        f"[metrics] Run cache: read {run_metrics.cache_read_tokens}, "
+        f"write {run_metrics.cache_write_tokens}, "
+        f"uncached input {run_metrics.input_tokens} tokens, "
+        f"cache-read share {_format_share(run_metrics.cache_read_share())}"
+    )
+    for label, bucket in sorted(run_metrics.by_label.items()):
+        logger.info(
+            f"[metrics]   {label}: {bucket.calls} call(s), ${bucket.cost_usd:.4f}, "
+            f"read {bucket.cache_read_tokens}, write {bucket.cache_write_tokens}, "
+            f"input {bucket.input_tokens}, share {_format_share(bucket.cache_read_share())}"
+        )
     _append_status(
         f"\n**Run metrics:** {run_metrics.calls} driver call(s), "
-        f"${run_metrics.cost_usd:.4f}, session {run_metrics.last_session_id}\n"
+        f"${run_metrics.cost_usd:.4f}, session {run_metrics.last_session_id}"
+        f", cache read {run_metrics.cache_read_tokens} / write {run_metrics.cache_write_tokens}"
+        f" / input {run_metrics.input_tokens} "
+        f"(share {_format_share(run_metrics.cache_read_share())})\n"
     )
     _commit_status_update("Record run metrics", project_root)
 

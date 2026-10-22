@@ -1004,3 +1004,13 @@ Plan written but not approved by human.
 
 
 **Run metrics:** 13 driver call(s), $1.3187, session fe5d3d30-157f-42ed-accc-4ff11ceb3001, cache read 1404347 / write 278105 / input 112 (share 83%)
+
+## 2026-10-22 — Collapse extra blank lines in rendered AGENTS.md
+
+### Done
+- `bootstrap()` now passes the formatted `AGENTS_MD_TEMPLATE` through `re.sub(r"\n{3,}", "\n\n", ...)` (AGENTS.md only); added `TestBootstrapAgentsMdSpacing` (no `\n\n\n` for typescript/python/go/unset, plus a test that the `## Gotchas` → `## Testing` single blank line survives). Confirmed the spacing tests fail with the `re.sub` reverted.
+
+## 2026-10-22 — Test language-specific content in rendered AGENTS.md
+
+### Done
+- Added `TestBootstrapAgentsMdLangContent`: `LANG_TESTING[lang]` appears verbatim for go/typescript/python, and `LANG_PATTERNS["go"]` appears verbatim for go.

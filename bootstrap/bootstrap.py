@@ -321,11 +321,9 @@ def bootstrap(project_dir: Path, lang: str) -> None:
 
     _make_dirs(project_dir)
 
-    _write_if_missing(
-        project_dir / "AGENTS.md",
-        AGENTS_MD_TEMPLATE.format(lang=lang or "not specified", lang_testing=LANG_TESTING.get(lang, ""), lang_patterns=LANG_PATTERNS.get(lang, "")),
-        project_dir,
-    )
+    agents_md = AGENTS_MD_TEMPLATE.format(lang=lang or "not specified", lang_testing=LANG_TESTING.get(lang, ""), lang_patterns=LANG_PATTERNS.get(lang, ""))
+    agents_md = re.sub(r"\n{3,}", "\n\n", agents_md)
+    _write_if_missing(project_dir / "AGENTS.md", agents_md, project_dir)
     _write_if_missing(
         project_dir / "memory" / "status.md",
         STATUS_MD_TEMPLATE.format(date=datetime.now(tz=UTC).date().isoformat(), lang=lang or "not specified"),

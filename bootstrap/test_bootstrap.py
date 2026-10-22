@@ -1,6 +1,14 @@
 from pathlib import Path
 
-from bootstrap.bootstrap import CONCEPTS_INDEX_TEMPLATE, COVERAGERC_TEMPLATE, bootstrap
+import pytest
+
+from bootstrap.bootstrap import (
+    CONCEPTS_INDEX_TEMPLATE,
+    COVERAGERC_TEMPLATE,
+    LANG_PATTERNS,
+    LANG_TESTING,
+    bootstrap,
+)
 
 
 class TestBootstrapCoveragerc:
@@ -76,3 +84,29 @@ class TestBootstrapMemoryModel:
         bootstrap(tmp_path, "python")
 
         assert concepts_index.read_text() == "custom concepts index\n"
+
+
+class TestBootstrapAgentsMdSpacing:
+    @pytest.mark.parametrize("lang", ["typescript", "python", "go", ""], ids=["typescript", "python", "go", "unset"])
+    def test_no_run_of_blank_lines(self, tmp_path: Path, lang: str) -> None:
+        bootstrap(tmp_path, lang)
+
+        assert "\n\n\n" not in (tmp_path / "AGENTS.md").read_text()
+
+    def test_intentional_single_blank_line_is_kept(self, tmp_path: Path) -> None:
+        bootstrap(tmp_path, "python")
+
+        assert "- (add things that have tripped agents up)\n\n## Testing" in (tmp_path / "AGENTS.md").read_text()
+
+
+class TestBootstrapAgentsMdLangContent:
+    @pytest.mark.parametrize("lang", ["go", "typescript", "python"])
+    def test_lang_testing_rendered_verbatim(self, tmp_path: Path, lang: str) -> None:
+        bootstrap(tmp_path, lang)
+
+        assert LANG_TESTING[lang] in (tmp_path / "AGENTS.md").read_text()
+
+    def test_go_lang_patterns_rendered_verbatim(self, tmp_path: Path) -> None:
+        bootstrap(tmp_path, "go")
+
+        assert LANG_PATTERNS["go"] in (tmp_path / "AGENTS.md").read_text()

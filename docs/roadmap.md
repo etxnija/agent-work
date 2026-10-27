@@ -238,7 +238,7 @@ Phase 2.3 — PRD, 2026-08-04.)
 |---|---|
 | Worker sandboxing (container/VM) — **required before FileGate and Ralph loop**; motivated further by the `cwd`-isolation leak found in Phase 1.1 (worktree sharing the main repo's `.git` isn't a hard boundary) | pending |
 | Refactor sub-agent (`agent refactor <path>`) — read-only, pattern-drift/duplication findings, no `model:` field yet | ✅ |
-| Architecture sub-agent (`agent architect [hint]`) — CLAIM/EXTRACT/DOUBT/RECONCILE bounded-cycle review, always whole-project scope with an optional free-text hint, `model: claude-opus-4-6`, AGENTS.md/roadmap/ADRs read as a required first step so findings are grounded in *why* the code is shaped that way, not just its current shape | ✅ |
+| Architecture sub-agent (`agent architect [hint]`) — CLAIM/EXTRACT/DOUBT/RECONCILE bounded-cycle review, always whole-project scope with an optional free-text hint, `model: claude-opus-5-5`, AGENTS.md/roadmap/ADRs read as a required first step so findings are grounded in *why* the code is shaped that way, not just its current shape | ✅ |
 | Native model routing — subagent `model:` frontmatter now actually takes effect (`ClaudeDriver` parses and passes `--model`); `planner.md`'s `claude-opus-4-6` and `reviewer.md`'s `claude-haiku-4-5` are the first real uses | ✅ |
 | FileGate (headless approval via sentinel file) | pending — blocked by sandboxing |
 | Ralph loop (iterative: pick task → implement → validate → commit → reset → repeat) | pending — blocked by sandboxing |

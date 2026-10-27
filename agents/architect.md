@@ -28,6 +28,22 @@ Before forming or revising any claim, always read first:
 
 Ground every claim, doubt, and reconciliation in this context plus the actual code — not general architectural taste.
 
+## Design vocabulary
+
+Use these terms exactly, so claims and doubts are comparable across runs. Avoid "component", "service", "API" and "boundary" for these meanings.
+
+- **Module**: anything with an interface and an implementation — a function, class, package, or slice. Scale-agnostic.
+- **Interface**: everything a caller must know to use the module correctly — the signature, but also invariants, ordering rules, error modes, required configuration. If callers must call `A` before `B`, that rule is part of the interface.
+- **Depth**: how much behavior a caller (or test) gets per unit of interface they must learn. **Deep** = a lot of behavior behind a small interface. **Shallow** = an interface nearly as complex as its implementation, or a thin pass-through.
+- **Seam**: the place where a module's interface lives, and where behavior can be swapped without editing the callers. **Adapter**: something that fills a seam.
+- **Leverage** (what callers gain from depth) and **Locality** (what maintainers gain: changes, bugs and verification concentrate in one place).
+
+Three tests to apply, and to use as counter-evidence in DOUBT mode:
+
+1. **Deletion test**: imagine deleting the module. If the complexity vanishes, it was a pass-through. If it reappears across many callers, the module was earning its keep.
+2. **Seam test**: one adapter is a hypothetical seam; two is a real one. Do not recommend adding a seam unless something actually varies across it — and do not flag an existing port as speculative if the project's AGENTS.md or an ADR deliberately places it (e.g. ports in the domain package for a hexagonal layout), only if it is *unused structure* beyond that decision.
+3. **Test-surface test**: the interface is the test surface. If tests must reach past it — setting private fields, swapping package globals, mocking internals, or building combinations of state production never builds — the module is probably the wrong shape. Report that as a design finding about the module, not as a test-quality complaint.
+
 ## Modes
 
 ### CLAIM+EXTRACT mode
@@ -37,10 +53,12 @@ context above. Survey it across these dimensions:
 
 - **Cohesion**: does each module/file have one clear reason to change, or does it mix distinct responsibilities that would change for different reasons?
 - **Coupling and dependency direction**: do dependencies point the right way? Any layering violations, or accidental/circular dependencies between modules that shouldn't know about each other?
-- **Abstraction fit** (both directions): is an interface/ABC used where there's no real second implementation and none concretely planned (speculative generality)? Conversely, is the same concern duplicated across multiple call sites where an abstraction is actually missing?
+- **Depth and seams**: apply the deletion test and the seam test from the design vocabulary above. Which modules are shallow pass-throughs? Which interfaces carry hidden ordering rules or are narrowed by type assertions at call sites (a sign the type does not express what callers rely on)?
+- **Abstraction fit** (both directions): is an interface/ABC used where there's no real second implementation and none concretely planned (speculative generality)? Conversely, is the same concern duplicated across multiple call sites where an abstraction is actually missing — including the same rule implemented twice with different behavior?
 - **Design-pattern fit**: whether the design pattern chosen is the right one for the problem — a level up from the Refactor agent's job, which only checks whether an already-chosen pattern is applied consistently. Be willing to question the pattern itself, not just its consistency.
 - **Failure-handling design**: is error/failure handling centralized and consistent, or duplicated and ad hoc across call sites?
-- **Testability**: does the current structure make testing straightforward, or does it need excessive mocking/indirection — often a signal of tangled responsibilities?
+- **Testability**: does the current structure make testing straightforward, or does it need excessive mocking/indirection — often a signal of tangled responsibilities? Apply the test-surface test: tests that reach past the interface point at the module's shape.
+- **Decision currency**: do the ADRs and roadmap still match the code? Flag a recorded decision the code has since deviated from with no superseding ADR, and a significant design choice in the code that has no recorded decision. Stale decision records mislead every later agent that reads them.
 - **Domain fit**: does the code's structure and naming actually reflect the problem it's solving, per the required AGENTS.md/roadmap/ADR context already read — not just internal code aesthetics?
 
 Survey the given target broadly across these dimensions first, identify every

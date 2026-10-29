@@ -2293,18 +2293,84 @@ class TestTaskDiff:
         assert "new.txt" in diff
         assert "+hello" in diff
 
-    def test_diff_truncated_when_exceeding_max_lines(self, tmp_path, monkeypatch):
-        self._init_repo(tmp_path)
-        long_content = "\n".join(f"line {i}" for i in range(600)) + "\n"
-        (tmp_path / "large.txt").write_text(long_content)
+    def _commit_files(self, path: Path, files: dict[str, str]) -> None:
+        env = {**os.environ, "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "t@t.com",
+               "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "t@t.com"}
+        for name, content in files.items():
+            (path / name).write_text(content)
+        subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "more"],
+                       cwd=path, check=True, capture_output=True, env=env)
 
+    @staticmethod
+    def _body(n: int, prefix: str = "line") -> str:
+        return "\n".join(f"{prefix} {i}" for i in range(n)) + "\n"
+
+    def test_small_diff_has_stat_header_and_no_note(self, tmp_path):
+        self._init_repo(tmp_path)
+        (tmp_path / "tracked.txt").write_text("changed\n")
+        diff = _task_diff(tmp_path)
+        assert "tracked.txt |" in diff
+        assert "NOTE:" not in diff
+
+    def test_pure_rename_listed_without_hunks(self, tmp_path):
+        self._init_repo(tmp_path)
+        self._commit_files(tmp_path, {"before.txt": self._body(20)})
+        subprocess.run(["git", "mv", "before.txt", "after.txt"],
+                       cwd=tmp_path, check=True, capture_output=True)
+        diff = _task_diff(tmp_path)
+        assert "Renamed without changes:\nbefore.txt -> after.txt" in diff
+        assert "@@" not in diff
+        assert "diff --git" not in diff
+
+    def test_rename_with_edit_is_a_normal_patch(self, tmp_path):
+        self._init_repo(tmp_path)
+        self._commit_files(tmp_path, {"before.txt": self._body(20)})
+        subprocess.run(["git", "mv", "before.txt", "after.txt"],
+                       cwd=tmp_path, check=True, capture_output=True)
+        (tmp_path / "after.txt").write_text(self._body(20).replace("line 5", "edited 5"))
+        diff = _task_diff(tmp_path)
+        assert "Renamed without changes:" not in diff
+        assert "rename from before.txt" in diff
+        assert "+edited 5" in diff
+        assert "@@" in diff
+
+    def test_huge_file_truncated_fairly_next_to_small_ones(self, tmp_path, monkeypatch):
+        self._init_repo(tmp_path)
         import runner.loop as mod
-        monkeypatch.setattr(mod, "MAX_DIFF_LINES", 10)
+        monkeypatch.setattr(mod, "MAX_DIFF_LINES", 200)
+        (tmp_path / "huge.txt").write_text(self._body(600))
+        for n in ("s1", "s2", "s3"):
+            (tmp_path / f"{n}.txt").write_text(self._body(5, n))
 
         diff = _task_diff(tmp_path)
-        assert "large.txt" in diff
-        assert "diff truncated:" in diff
-        assert "additional lines omitted" in diff
+        lines = diff.splitlines()
+        for n in ("huge", "s1", "s2", "s3"):
+            assert f"diff --git a/{n}.txt" in diff
+        assert "[file truncated:" in diff
+        assert "+s1 4" in diff and "+s2 4" in diff and "+s3 4" in diff
+        stat_end = next(i for i, l in enumerate(lines) if "changed" in l and "file" in l)
+        assert lines[stat_end + 1].startswith("NOTE: partial diff")
+        patch_start = next(i for i, l in enumerate(lines) if l.startswith("diff --git"))
+        assert len(lines) - patch_start <= 200
+
+    def test_more_files_than_fit_lists_the_rest(self, tmp_path, monkeypatch):
+        self._init_repo(tmp_path)
+        import runner.loop as mod
+        monkeypatch.setattr(mod, "MAX_DIFF_LINES", 60)
+        for i in range(5):
+            (tmp_path / f"f{i}.txt").write_text(self._body(5, f"f{i}"))
+        diff = _task_diff(tmp_path)
+        assert "Files not shown (diff budget exceeded): f2.txt, f3.txt, f4.txt" in diff
+        assert "3 file(s) not shown" in diff
+
+    def test_output_is_deterministic(self, tmp_path, monkeypatch):
+        self._init_repo(tmp_path)
+        import runner.loop as mod
+        monkeypatch.setattr(mod, "MAX_DIFF_LINES", 90)
+        for i in range(4):
+            (tmp_path / f"f{i}.txt").write_text(self._body(100, f"f{i}"))
+        assert _task_diff(tmp_path) == _task_diff(tmp_path)
 
     def test_no_changes_returns_empty_diff(self, tmp_path):
         self._init_repo(tmp_path)
@@ -2335,6 +2401,16 @@ class TestReviewVerdict:
         approved, critique = _review_verdict("  I'm not sure about this.  ")
         assert approved is False
         assert critique == "I'm not sure about this."
+
+
+# ── reviewer prompt file ─────────────────────────────────────────────────────
+
+class TestReviewerPromptFile:
+    def test_marker_lines_live_in_output_format_section(self):
+        text = (Path(__file__).resolve().parent.parent / "agents" / "reviewer.md").read_text()
+        output_format = text.split("## Output format", 1)[1]
+        for signal in (REVIEW_APPROVED_SIGNAL, REVIEW_CHANGES_SIGNAL):
+            assert signal in output_format
 
 
 # ── _worker_summary ──────────────────────────────────────────────────────────
@@ -3326,6 +3402,91 @@ class TestStatusGuardWiring:
             "restored the original and kept 2 new line(s)."
         )
         assert guard_warnings == [expected + (" (worktree copy)" if separate_worktree else "")]
+
+
+class TestStatusEntryWiring:
+    ORIGINAL = "- old entry\n"
+
+    @pytest.mark.parametrize(("written", "expected"), [
+        (ORIGINAL + "- new one\n- new two\n", "- new one\n- new two"),
+        ("- REWRITTEN\n- new entry\n", "- REWRITTEN\n- new entry"),
+        (ORIGINAL, ""),
+    ], ids=["append-only", "rewrite-restored", "untouched"])
+    def test_status_entry_passed_to_checks(self, tmp_path, written, expected):
+        from runner.loop import STATUS_MD, _run_one_task
+
+        (tmp_path / "memory").mkdir()
+        target = tmp_path / STATUS_MD
+        target.write_text(self.ORIGINAL)
+        handle = WorkspaceHandle(path=tmp_path, branch="")
+
+        def write(agent_name, prompt, context_files=None, cwd=None):
+            target.write_text(written)
+            return _ok("done")
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = write
+
+        with patch("runner.loop._run_task_checks", return_value=([], [])) as checks, \
+             patch("runner.loop._commit_task"), \
+             patch("runner.loop._main_checkout_dirty_paths", return_value=[]):
+            _run_one_task(
+                driver, handle, 1, 1, "1. **t** — x", "plan.md", "AGENTS.md",
+                str(target), tmp_path, {}, Metrics(), [],
+            )
+
+        assert checks.call_args.kwargs["status_entry"] == expected
+
+
+class TestReviewStatusEntry:
+    def _prompt(self, status_entry, **kwargs):
+        from runner.loop import _run_single_review
+
+        driver = MagicMock()
+        driver.run_subagent.return_value = _ok("REVIEW: APPROVED fine")
+        with patch("runner.loop._task_diff", return_value="DIFFTEXT"):
+            _run_single_review(driver, Path("."), "TASK", status_entry=status_entry, **kwargs)
+        return driver.run_subagent.call_args.args[1]
+
+    @pytest.mark.parametrize("entry", [None, "", "  \n "])
+    def test_prompt_unchanged_without_entry(self, entry):
+        from runner.loop import REVIEWER_STATIC_INSTRUCTIONS
+
+        expected = (
+            f"{REVIEWER_STATIC_INSTRUCTIONS}\n\nTask:\nTASK\n\n"
+            "Diff:\n```diff\nDIFFTEXT\n```"
+        )
+        assert self._prompt(entry) == expected
+
+    def test_entry_appended_after_diff(self):
+        prompt = self._prompt("- did the thing\n")
+        assert prompt.endswith(
+            "Diff:\n```diff\nDIFFTEXT\n```\n\n"
+            "Status entry the Worker wrote for this task:\n```\n- did the thing\n```"
+        )
+
+    def test_long_entry_is_capped(self):
+        from runner.loop import MAX_STATUS_ENTRY_CHARS
+
+        prompt = self._prompt("x" * 5000)
+        body = prompt.split("Status entry the Worker wrote for this task:\n```\n")[1]
+        entry = body[: -len("\n```")]
+        assert len(entry) <= MAX_STATUS_ENTRY_CHARS
+        assert entry.endswith("… [truncated]")
+
+    def test_retry_forwards_entry_to_every_review(self, tmp_path):
+        from runner.loop import REVIEW_RETRY_LIMIT, _run_review_with_retry
+
+        with patch("runner.loop._run_single_review", return_value=(False, "no")) as single, \
+             patch("runner.loop._retry_review_correction", return_value=True), \
+             patch("runner.loop._run_sensors_with_retry", return_value=([], 0)):
+            _run_review_with_retry(
+                tmp_path, "t", 1, 1, "p", "a", "s", MagicMock(), {}, status_entry="ENTRY",
+            )
+        # Reviews run at attempts 0..REVIEW_RETRY_LIMIT; every rejection below the
+        # limit triggers a correction (mocked to succeed) and a fresh review.
+        assert single.call_count == REVIEW_RETRY_LIMIT + 1
+        assert all(c.kwargs["status_entry"] == "ENTRY" for c in single.call_args_list)
 
 
 # ── Outstanding findings in the squash commit body ───────────────────────────

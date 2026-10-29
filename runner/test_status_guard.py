@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from runner.status_guard import enforce_append_only, read_status_text
+from runner.status_guard import appended_text, enforce_append_only, read_status_text
 
 BEFORE = "- one\n- two\n- three\n"
 
@@ -123,3 +123,35 @@ def test_read_status_text(tmp_path):
     assert read_status_text(path) is None
     path.write_text(BEFORE)
     assert read_status_text(path) == BEFORE
+
+
+# (case id, before, content now, expected appended text)
+APPENDED_CASES = [
+    ("pure-append", BEFORE, BEFORE + "- four\n", "- four\n"),
+    ("unchanged", BEFORE, BEFORE, ""),
+    ("before-without-trailing-newline", "- one", "- one\n- new\n", "\n- new\n"),
+    ("rewrite", BEFORE, "- one\n- TWO\n- three\n- four\n", "- TWO\n- four"),
+    ("emptied", BEFORE, "", ""),
+    ("rewrite-inserting-blank-line", BEFORE, "- one\n\n- TWO\n  \n- three\n- four\n", "- TWO\n- four"),
+]
+
+
+@pytest.mark.parametrize(
+    ("before", "now", "expected"),
+    [c[1:] for c in APPENDED_CASES],
+    ids=[c[0] for c in APPENDED_CASES],
+)
+def test_appended_text(tmp_path, before, now, expected):
+    path = tmp_path / "status.md"
+    path.write_text(now)
+    assert appended_text(path, before) == expected
+
+
+def test_appended_text_missing_file(tmp_path):
+    assert appended_text(tmp_path / "nope.md", BEFORE) == ""
+
+
+def test_appended_text_none_before(tmp_path):
+    path = tmp_path / "status.md"
+    path.write_text("- x\n")
+    assert appended_text(path, None) == ""

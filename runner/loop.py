@@ -28,7 +28,8 @@ from .drivers.base import AgentDriver
 from .gates import get_gate
 from .metrics import Metrics, _MeteredDriver
 from .sandbox import get_sandbox
-from .status_guard import enforce_append_only, read_status_text
+from .status_guard import appended_text, enforce_append_only, read_status_text
+from .task_diff import build_task_diff
 
 logger = logging.getLogger("agent_loop")
 logger.setLevel(logging.DEBUG)
@@ -385,6 +386,7 @@ def _run_single_review(
     worktree: Path,
     task_text: str,
     context_files: list[str] | None = None,
+    status_entry: str | None = None,
 ) -> tuple[bool, str]:
     """Run one reviewer sub-agent pass over the task's current diff."""
     diff = _task_diff(worktree)
@@ -393,6 +395,11 @@ def _run_single_review(
         f"Task:\n{task_text}\n\n"
         f"Diff:\n```diff\n{diff}\n```"
     )
+    entry = (status_entry or "").strip()
+    if entry:
+        if len(entry) > MAX_STATUS_ENTRY_CHARS:
+            entry = entry[: MAX_STATUS_ENTRY_CHARS - len(STATUS_ENTRY_TRUNCATED)] + STATUS_ENTRY_TRUNCATED
+        review_prompt += f"\n\nStatus entry the Worker wrote for this task:\n```\n{entry}\n```"
     review_result = driver.run_subagent(
         REVIEWER_AGENT, review_prompt, context_files=context_files, cwd=worktree
     )
@@ -462,6 +469,7 @@ def _run_review_with_retry(
     review_critiques: dict[int, str],
     context_files: list[str] | None = None,
     model: str | None = None,
+    status_entry: str | None = None,
 ) -> tuple[bool, str, int, int, list[tuple[str, str]]]:
     """
     Run the adversarial-review cycle for one task, retrying up to
@@ -480,7 +488,9 @@ def _run_review_with_retry(
     ctx = context_files if context_files is not None else [agents_abs]
     while True:
         logger.info(f"[review:start] Task {i}/{total}: Running adversarial review ({REVIEWER_AGENT})...")
-        approved, critique = _run_single_review(driver, worktree, task_text, context_files=ctx)
+        approved, critique = _run_single_review(
+            driver, worktree, task_text, context_files=ctx, status_entry=status_entry
+        )
 
         if approved:
             review_critiques.pop(i, None)
@@ -517,6 +527,8 @@ def _run_review_with_retry(
 
 
 MAX_DIFF_LINES = 500
+MAX_STATUS_ENTRY_CHARS = 2000
+STATUS_ENTRY_TRUNCATED = "… [truncated]"
 
 
 def _task_diff(worktree: Path) -> str:
@@ -528,22 +540,22 @@ def _task_diff(worktree: Path) -> str:
     all show up, since sub-agents like the reviewer have no Bash and can't
     run git diff themselves.
 
-    Caps raw output at MAX_DIFF_LINES lines to avoid flooding prompt context.
+    Returns a stat header, a list of pure renames, and per-file patches that
+    share a MAX_DIFF_LINES budget fairly (see runner/task_diff.py) so one huge
+    file cannot crowd the others out of the reviewer's prompt. Returns "" when
+    there is nothing to diff or git fails.
     """
     subprocess.run(["git", "add", "-A"], cwd=worktree, capture_output=True, check=False)
-    result = subprocess.run(
-        ["git", "diff", "--cached", "HEAD"],
-        cwd=worktree, capture_output=True, text=True, check=False,
-    )
-    diff = result.stdout
-    lines = diff.splitlines()
-    if len(lines) > MAX_DIFF_LINES:
-        truncated_count = len(lines) - MAX_DIFF_LINES
-        diff = (
-            "\n".join(lines[:MAX_DIFF_LINES])
-            + f"\n\n... [diff truncated: {truncated_count} additional lines omitted]"
+    patch, stat = (
+        subprocess.run(
+            ["git", "diff", "--cached", "-M", *extra, "HEAD"],
+            cwd=worktree, capture_output=True, text=True, check=False,
         )
-    return diff
+        for extra in ([], ["--stat"])
+    )
+    if patch.returncode != 0 or stat.returncode != 0 or not patch.stdout.strip():
+        return ""
+    return build_task_diff(patch.stdout, stat.stdout, MAX_DIFF_LINES)
 
 
 def _review_verdict(text: str) -> tuple[bool, str]:
@@ -1182,6 +1194,7 @@ def _run_task_checks(
     status_abs: str,
     task_context: list[str],
     review_critiques: dict[int, str],
+    status_entry: str | None = None,
 ) -> tuple[list[str] | None, list[tuple[str, str]]]:
     """
     Run sensors, code-health, and adversarial review for a task the worker has
@@ -1221,6 +1234,7 @@ def _run_task_checks(
         review_critiques,
         context_files=task_context,
         model=worker_model,
+        status_entry=status_entry,
     )
     if failures:
         return None, failures
@@ -1263,6 +1277,16 @@ def _snapshot_status_copies(status_abs: str, worktree: Path) -> list[tuple[str, 
         seen.add(resolved)
         snapshots.append((path, read_status_text(path)))
     return snapshots
+
+
+def _status_entry(snapshots: list[tuple[str, str | None]]) -> str:
+    """The text the Worker appended across all status.md copies, de-duplicated, in snapshot order."""
+    parts: list[str] = []
+    for path, before_text in snapshots:
+        part = appended_text(path, before_text).strip()
+        if part and part not in parts:
+            parts.append(part)
+    return "\n".join(parts)
 
 
 def _guard_status_copies(
@@ -1338,9 +1362,20 @@ def _run_one_task(
         if _file_hash(status_abs) == status_hash_before:
             logger.warning(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
         _guard_status_copies(status_snapshots, status_abs, i, total, guard_warnings)
+        status_entry = _status_entry(status_snapshots)
 
         code_health_findings, failures = _run_task_checks(
-            driver, handle, i, total, task_text, plan_abs, agents_abs, status_abs, task_context, review_critiques
+            driver,
+            handle,
+            i,
+            total,
+            task_text,
+            plan_abs,
+            agents_abs,
+            status_abs,
+            task_context,
+            review_critiques,
+            status_entry=status_entry,
         )
         if code_health_findings is None:
             return _handle_sensor_failure(failures, i, total, handle, project_root)

@@ -1029,3 +1029,9 @@ Plan written but not approved by human.
 
 
 **Run metrics:** 14 driver call(s), $2.0845, session 847d6d8e-62d9-4105-97e3-bca9f1d45e2f, cache read 2069918 / write 374227 / input 138 (share 85%)
+- Reviewer diff is now structured and budgeted: new `runner/task_diff.py` (stat header, pure-rename block, water-filling per-file patch budget, NOTE/`Files not shown` lines) used by `_task_diff`; tests in `test_task_diff.py` and `TestTaskDiff`. Verified in a real temp repo that `git diff --cached -M` reports a pure rename as `similarity index 100%` + `rename from/to` with no `---`/`+++`/hunks.
+- Reviewer now sees the Worker's status.md entry: `status_guard.appended_text` + `_status_entry` in `_run_one_task` derive it, threaded through `_run_task_checks` / `_run_review_with_retry` to `_run_single_review`, which appends it after the diff capped at `MAX_STATUS_ENTRY_CHARS` (2000); prompt unchanged when empty.
+- Reviewer prompt (`agents/reviewer.md`) now documents the stat/NOTE/rename/truncation parts and the Worker status entry, with two new review steps (verify status claims; state partial coverage in the verdict); added `TestReviewerPromptFile` guarding the marker lines, updated `adversarial-review.md`.
+
+
+**Run metrics:** 20 driver call(s), $2.2639, session d6dec3cc-5fbb-4d23-9306-7c82cdf1c653, cache read 2062119 / write 466250 / input 160 (share 82%)

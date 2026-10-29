@@ -55,6 +55,29 @@ def enforce_append_only(path: str | Path, before_text: str | None) -> int | None
     return len(kept) if _write(p, restored) else None
 
 
+def appended_text(path: str | Path, before_text: str | None) -> str:
+    """
+    Return what was added to the file since `before_text` was snapshotted.
+
+    When the file still starts with `before_text` this is the remainder;
+    otherwise the non-blank lines not present in `before_text` (the same rule
+    enforce_append_only uses for kept lines, minus spacing). "" when `before_text` is None or
+    the file is missing/unreadable. Never raises.
+    """
+    if before_text is None:
+        return ""
+    try:
+        after = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    if after.startswith(before_text):
+        return after[len(before_text):]
+    old_lines = set(before_text.splitlines())
+    return "\n".join(
+        line for line in after.splitlines() if line.strip() and line not in old_lines
+    )
+
+
 def _write(path: Path, text: str) -> bool:
     try:
         path.write_text(text, encoding="utf-8")

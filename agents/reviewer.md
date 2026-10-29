@@ -20,7 +20,13 @@ stop.
 
 The prompt contains:
 - The task's description (what it was supposed to do).
-- The task's diff (what actually changed), fenced as a diff block.
+- The task's diff (what actually changed), fenced as a diff block. It is structured and size-budgeted:
+  - A stat header listing **all** changed files, even ones whose patch is not shown.
+  - A `NOTE: partial diff …` line under the stat — present **only** when something was cut. If it is absent, the diff is complete.
+  - A `Renamed without changes:` block listing pure renames (no content change, so no patch).
+  - Per-file patches; a file cut to fit the budget ends with a `... [file truncated: N additional lines omitted]` marker.
+  - A `Files not shown …` line naming files that got no patch at all because the budget ran out.
+- Optionally, a `Status entry the Worker wrote for this task:` section after the diff, quoting what the Worker appended to `status.md`. Absent when the Worker wrote nothing.
 
 ## How to review
 
@@ -30,6 +36,8 @@ The prompt contains:
 4. **Bound your exploration budget**:
    - Limit codebase inspection to a handful of targeted checks (1 to 3 `Read`/`Grep` calls) to check immediate caller sites or coupled interfaces. Never conduct an open-ended audit of the surrounding codebase.
    - If a diff is self-contained and clean, a quick pattern-consistency check is sufficient. Needing many checks to understand a change is a signal that the implementation approach is overly complex or unclear — flag that in your critique rather than wandering through unrelated files.
+5. **Check the status entry's claims against the diff**: If a `Status entry the Worker wrote for this task:` section is present, check each factual claim in it (what was added, changed, fixed, or verified) against the diff. A claim the diff does not support, or that the diff contradicts, is grounds for `CHANGES REQUESTED` — cite the claim in your critique.
+6. **Handle partial diffs honestly**: If a `NOTE` says the diff is partial, state that in your verdict sentence (e.g. `APPROVED on the shown portion; not reviewed: <files>`). Never approve claims that are not visible in the shown diff. You may use `Read`/`Grep` on truncated files to inspect what was cut, within your exploration budget.
 
 ## Output format
 

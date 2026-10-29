@@ -3,7 +3,7 @@ type: pattern
 tags: [invest, loop, task, commits, plan]
 summary: INVEST task decomposition, plan verification, per-task commit hooks, and merge workflow.
 links: [docs/arch/adr/0008-per-task-implementation.md]
-updated: 2026-08-11
+updated: 2026-10-29
 verified: [{ by: "human", at: 2026-10-22 }]
 ---
 
@@ -13,7 +13,7 @@ verified: [{ by: "human", at: 2026-10-22 }]
 Large, un-bounded plans lead to massive diffs, complex tool turns, and un-reviewable PRs. Task decomposition forces plans into small, independent, testable units (INVEST principle).
 
 ## Key Rules & Mechanics
-- **Planner Sub-Agent (`agents/planner.md`):** Operates on `model: claude-opus-4-6` with read-only tools (`Read, Glob, Grep, Write`). Explores the codebase and outputs `plan.md`.
+- **Planner Sub-Agent (`agents/planner.md`):** Operates on `model: claude-opus-5-5` with read-only tools (`Read, Glob, Grep, Write`). Explores the codebase and outputs `plan.md`.
 - **`## Tasks` Specification:** `plan.md` must contain a numbered list under `## Tasks`. Each task defines `1. **Title** — description`, `Files: ...`, `What: ...`.
 - **Plan Validation Before Approval:** The loop verifies `PLAN READY` and non-empty `_parse_tasks()` before requesting human approval (`gate.request()`), retrying up to `PLANNER_RETRY_LIMIT = 2` times if invalid.
 - **Per-Task Execution Loop:** The harness implements tasks sequentially one at a time. Each task is executed in the worktree, validated against sensors/code-health/review, and committed individually via `_commit_task()`.

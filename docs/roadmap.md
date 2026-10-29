@@ -194,7 +194,7 @@ read-diff-and-verdict.
 | `MAX_DIFF_LINES = 500` — reviewer's diff capped with a disclosed `"[diff truncated: N lines omitted]"` marker, not silent | ✅ |
 | `agents/reviewer.md` bounded — explicit division of labor with sensors (don't re-derive mechanical checks), exploration capped at 1-3 targeted Read/Grep calls, excessive exploration reframed as a complexity signal rather than thoroughness | ✅ |
 | Real-time `:start`/`:done` progress logging + immediate `sys.stdout.flush()` across the per-task pipeline | ✅ |
-| **Planner's own status.md read is still unbounded** — reads the entire file (111KB+ and growing) unconditionally every planning call, on the most expensive model (`claude-opus-4-6`); the one place in the pipeline not yet covered by this optimization pass | pending — blocked was on durable memory currency (now built, not yet verified reliable — see Phase 3) |
+| **Planner's own status.md read is still unbounded** — reads the entire file (111KB+ and growing) unconditionally every planning call, on the most expensive model (`claude-opus-5-5`); the one place in the pipeline not yet covered by this optimization pass | pending — blocked was on durable memory currency (now built, not yet verified reliable — see Phase 3) |
 
 ---
 

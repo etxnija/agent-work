@@ -28,6 +28,7 @@ from .drivers.base import AgentDriver
 from .gates import get_gate
 from .metrics import Metrics, _MeteredDriver
 from .sandbox import get_sandbox
+from .status_guard import enforce_append_only, read_status_text
 
 logger = logging.getLogger("agent_loop")
 logger.setLevel(logging.DEBUG)
@@ -574,6 +575,35 @@ def _worker_summary(text: str) -> str:
 
 # ── Git helpers ──────────────────────────────────────────────────────────────
 
+FINDINGS_HEADING = "Outstanding review findings (not resolved before merge):"
+FINDING_MAX_CHARS = 600
+
+
+def _finding_line(label: str, text: str) -> str:
+    """One commit-body line: whitespace-collapsed (single line, no leading '#'), capped."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) > FINDING_MAX_CHARS:
+        collapsed = collapsed[: FINDING_MAX_CHARS - 1] + "…"
+    return f"- {label}: {collapsed}"
+
+
+def _outstanding_findings_section(
+    critiques: dict[int, str] | None,
+    code_health_issues: dict[int, list[str]] | None,
+    guard_warnings: list[str] | None,
+) -> str:
+    """Commit-body section listing unresolved findings, or "" when there are none."""
+    critiques = critiques or {}
+    code_health_issues = code_health_issues or {}
+    lines = [_finding_line(f"Task {n} critique", critiques[n]) for n in sorted(critiques)]
+    for n in sorted(code_health_issues):
+        lines += [_finding_line(f"Task {n} code-health", f) for f in code_health_issues[n]]
+    lines += [_finding_line("Guard", w) for w in guard_warnings or []]
+    if not lines:
+        return ""
+    return "\n".join([FINDINGS_HEADING, *lines])
+
+
 def _squash_subject(task: str, branch: str) -> str:
     """
     Derive a short commit subject from the task string, falling back to the
@@ -816,15 +846,76 @@ def _stamp_verified(path: Path) -> None:
     path.write_text(f"---{frontmatter}\n---{parts[2]}")
 
 
+def _stamp_staged_concepts(project_root: Path) -> None:
+    """Stamp verification on staged concept bundles and re-stage them."""
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    for rel_path in staged.stdout.splitlines():
+        path = Path(rel_path)
+        if path.match("memory/concepts/*.md") and path.name != "index.md":
+            _stamp_verified(project_root / path)
+            subprocess.run(["git", "add", rel_path], cwd=project_root, capture_output=True, check=False)
+
+
+def _squash_message(
+    task: str,
+    branch: str,
+    commits: list[str],
+    critiques: dict[int, str] | None,
+    code_health_issues: dict[int, list[str]] | None,
+    guard_warnings: list[str] | None,
+) -> str:
+    """Build the squash commit message: short subject, per-task commits + full task, findings."""
+    subject = _squash_subject(task, branch)
+    body = "\n".join(f"- {c}" for c in commits)
+    if task.strip():
+        body = f"{body}\n\n{task.strip()}"
+    commit_msg = f"{subject}\n\n{body}"
+    findings = _outstanding_findings_section(critiques, code_health_issues, guard_warnings)
+    if findings:
+        commit_msg = f"{commit_msg}\n\n{findings}"
+    return commit_msg
+
+
+def _delete_merged_branch(branch: str, project_root: Path) -> None:
+    """Delete a squash-merged branch and report the outcome."""
+    delete = subprocess.run(
+        ["git", "branch", "-D", branch],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if delete.returncode == 0:
+        _clear_last_run_state_if_matches(project_root, branch)
+        logger.info(f"[merge] Done. Squashed into one commit; branch '{branch}' deleted.")
+    else:
+        logger.info(
+            f"[merge] Done. Squashed into one commit; branch '{branch}' "
+            f"could not be deleted: {delete.stderr.strip()}"
+        )
+
+
 def _perform_squash_merge(
     branch: str,
     project_root: Path,
     task: str,
     commits: list[str],
     metrics_entry: str | None = None,
+    critiques: dict[int, str] | None = None,
+    code_health_issues: dict[int, list[str]] | None = None,
+    guard_warnings: list[str] | None = None,
 ) -> str:
     """
     Squash branch's commits into one commit on the current branch, deleting branch on success.
+
+    Unresolved critiques, code-health findings and guard warnings are recorded in the
+    commit body so they stay searchable in tracked history.
 
     If metrics_entry is given, it is appended to memory/status.md and staged so it
     lands in the squash commit; a failed commit restores the squash-staged state.
@@ -841,25 +932,8 @@ def _perform_squash_merge(
         logger.info(f"[merge] Branch '{branch}' preserved.")
         return "squash failed"
 
-    staged = subprocess.run(
-        ["git", "diff", "--cached", "--name-only"],
-        cwd=project_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    for rel_path in staged.stdout.splitlines():
-        path = Path(rel_path)
-        if path.match("memory/concepts/*.md") and path.name != "index.md":
-            _stamp_verified(project_root / path)
-            subprocess.run(["git", "add", rel_path], cwd=project_root, capture_output=True, check=False)
-
-    # Build a single commit message: short subject, per-task commits + full task as body.
-    subject = _squash_subject(task, branch)
-    body = "\n".join(f"- {c}" for c in commits)
-    if task.strip():
-        body = f"{body}\n\n{task.strip()}"
-    commit_msg = f"{subject}\n\n{body}"
+    _stamp_staged_concepts(project_root)
+    commit_msg = _squash_message(task, branch, commits, critiques, code_health_issues, guard_warnings)
 
     status_path = project_root / STATUS_MD
     original_status: str | None = None
@@ -879,21 +953,7 @@ def _perform_squash_merge(
         status_path.write_text(original_status)
         subprocess.run(["git", "add", STATUS_MD], cwd=project_root, capture_output=True, check=False)
     if commit.returncode == 0:
-        delete = subprocess.run(
-            ["git", "branch", "-D", branch],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if delete.returncode == 0:
-            _clear_last_run_state_if_matches(project_root, branch)
-            logger.info(f"[merge] Done. Squashed into one commit; branch '{branch}' deleted.")
-        else:
-            logger.info(
-                f"[merge] Done. Squashed into one commit; branch '{branch}' "
-                f"could not be deleted: {delete.stderr.strip()}"
-            )
+        _delete_merged_branch(branch, project_root)
         return "merged"
 
     logger.info(f"[merge] Commit failed: {commit.stderr.strip()}")
@@ -909,6 +969,7 @@ def _offer_merge(
     narrative_path: Path | None = None,
     code_health_issues: dict[int, list[str]] | None = None,
     metrics_entry: str | None = None,
+    guard_warnings: list[str] | None = None,
 ) -> str:
     """
     Show commits on branch and offer a squash-merge into HEAD.
@@ -943,6 +1004,11 @@ def _offer_merge(
             for finding in findings:
                 logger.info(f"    - {finding}")
 
+    if guard_warnings:
+        logger.info("\n[guard] Outstanding memory/status.md guard warnings:")
+        for warning in guard_warnings:
+            logger.info(f"  {warning}")
+
     _show_diff_in_editor(branch, project_root, critiques, code_health_issues)
     if narrative_path is not None and "ZELLIJ" in os.environ:
         _zellij_edit(str(narrative_path))
@@ -953,7 +1019,11 @@ def _offer_merge(
         logger.info(f"  git merge --squash {branch} && git commit && git branch -D {branch}")
         return "declined"
 
-    return _perform_squash_merge(branch, project_root, task, commits, metrics_entry)
+    return _perform_squash_merge(
+        branch, project_root, task, commits, metrics_entry,
+        critiques=critiques, code_health_issues=code_health_issues,
+        guard_warnings=guard_warnings,
+    )
 
 
 def _update_coverage_baseline(project_root: Path) -> None:
@@ -1182,6 +1252,41 @@ def _print_task_metrics(i: int, total: int, run_metrics: Metrics, calls_before: 
     )
 
 
+def _snapshot_status_copies(status_abs: str, worktree: Path) -> list[tuple[str, str | None]]:
+    """Snapshot (path, text) of each status.md copy the Worker could touch, de-duplicated by resolved path."""
+    snapshots: list[tuple[str, str | None]] = []
+    seen: set[Path] = set()
+    for path in (status_abs, str(worktree / STATUS_MD)):
+        resolved = Path(path).resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        snapshots.append((path, read_status_text(path)))
+    return snapshots
+
+
+def _guard_status_copies(
+    snapshots: list[tuple[str, str | None]],
+    status_abs: str,
+    i: int,
+    total: int,
+    guard_warnings: list[str],
+) -> None:
+    """Restore any status.md copy whose earlier content was modified; record a warning per restore."""
+    for path, before_text in snapshots:
+        kept = enforce_append_only(path, before_text)
+        if kept is None:
+            continue
+        message = (
+            f"Task {i}/{total}: the Worker modified existing {STATUS_MD} content; "
+            f"restored the original and kept {kept} new line(s)."
+        )
+        if Path(path).resolve() != Path(status_abs).resolve():
+            message = message + " (worktree copy)"
+        logger.warning(f"[guard] {message}")
+        guard_warnings.append(message)
+
+
 def _run_one_task(
     driver: AgentDriver,
     handle,
@@ -1194,6 +1299,7 @@ def _run_one_task(
     project_root: Path,
     review_critiques: dict[int, str],
     run_metrics: Metrics,
+    guard_warnings: list[str],
 ) -> int | list[str]:
     """
     Implement and validate one task: worker call, sensors, code-health,
@@ -1213,6 +1319,7 @@ def _run_one_task(
     calls_before, cost_before = run_metrics.calls, run_metrics.cost_usd
     status_hash_before = _file_hash(status_abs)
     main_dirty_before = _main_checkout_dirty_paths(project_root, status_abs)
+    status_snapshots = _snapshot_status_copies(status_abs, handle.path)
 
     task_prompt = (
         f"Task to implement from {plan_abs} (today: {datetime.now(tz=UTC).date().isoformat()}):\n"
@@ -1230,6 +1337,7 @@ def _run_one_task(
 
         if _file_hash(status_abs) == status_hash_before:
             logger.warning(f"[warning] Worker did not update {STATUS_MD} after task {i}.")
+        _guard_status_copies(status_snapshots, status_abs, i, total, guard_warnings)
 
         code_health_findings, failures = _run_task_checks(
             driver, handle, i, total, task_text, plan_abs, agents_abs, status_abs, task_context, review_critiques
@@ -1237,6 +1345,7 @@ def _run_one_task(
         if code_health_findings is None:
             return _handle_sensor_failure(failures, i, total, handle, project_root)
 
+        _guard_status_copies(status_snapshots, status_abs, i, total, guard_warnings)
         _commit_task(i, _task_title(task_text), handle.path)
         _print_task_metrics(i, total, run_metrics, calls_before, cost_before)
 
@@ -1273,6 +1382,7 @@ def _finalize_run(
     review_critiques: dict[int, str],
     code_health_issues: dict[int, list[str]],
     run_metrics: Metrics,
+    guard_warnings: list[str] | None = None,
 ) -> None:
     """Offer a merge, and print/append final metrics (in the squash commit when merged)."""
     outcome: str | None = None
@@ -1287,6 +1397,7 @@ def _finalize_run(
             narrative_path=log_path,
             code_health_issues=code_health_issues,
             metrics_entry=entry,
+            guard_warnings=guard_warnings,
         )
         _append_log_outcome(log_path, outcome)
         if outcome == "merged":
@@ -1326,22 +1437,23 @@ def _implement_tasks(
     """
     Implement all tasks inside one sandbox workspace, one task at a time.
 
-    Returns (exit_code, handle, review_critiques, code_health_issues).
+    Returns (exit_code, handle, review_critiques, code_health_issues, guard_warnings).
     exit_code is None on success, with handle.keep() already called;
     otherwise the caller should return exit_code immediately (the failing
     task already handled its own branch-preservation decision).
     """
     review_critiques: dict[int, str] = {}
     code_health_issues: dict[int, list[str]] = {}
+    guard_warnings: list[str] = []
 
     with sandbox.workspace(project_root) as handle:
         for i, task_text in enumerate(tasks, 1):
             result = _run_one_task(
                 driver, handle, i, len(tasks), task_text, plan_abs, agents_abs, status_abs,
-                project_root, review_critiques, run_metrics,
+                project_root, review_critiques, run_metrics, guard_warnings,
             )
             if isinstance(result, int):
-                return result, handle, review_critiques, code_health_issues
+                return result, handle, review_critiques, code_health_issues, guard_warnings
 
             findings = result
             if findings:
@@ -1351,7 +1463,7 @@ def _implement_tasks(
         if handle.branch:
             _write_last_run_state(project_root, handle.branch, handle.path)
 
-    return None, handle, review_critiques, code_health_issues
+    return None, handle, review_critiques, code_health_issues, guard_warnings
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
@@ -1403,7 +1515,7 @@ def run_loop(task: str) -> int:
 
         logger.info(f"\n[loop] {len(tasks)} task(s) to implement.")
 
-        exit_code, handle, review_critiques, code_health_issues = _implement_tasks(
+        exit_code, handle, review_critiques, code_health_issues, guard_warnings = _implement_tasks(
             driver, sandbox, tasks, plan_abs, agents_abs, status_abs, project_root, run_metrics,
         )
         if exit_code is not None:
@@ -1411,7 +1523,7 @@ def run_loop(task: str) -> int:
 
         _finalize_run(
             task, project_root, log_path, handle,
-            review_critiques, code_health_issues, run_metrics,
+            review_critiques, code_health_issues, run_metrics, guard_warnings,
         )
 
         logger.info(f"\n[loop] All {len(tasks)} tasks complete.")

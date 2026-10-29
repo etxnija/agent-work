@@ -37,6 +37,7 @@ the same memory system — see Memory model below.
 - `memory/status.md` is the raw chronological log — append-only, currently unattributed
   (no author/session field). Treat entries as project history, not a personal journal, even
   though nothing yet records who or which run wrote them.
+- The loop enforces `status.md` append-only deterministically (`runner/status_guard.py`): if the Worker rewrites or deletes earlier content, the original is restored, genuinely new lines are kept, and a `[guard]` warning is logged.
 - Plain markdown in git was a deliberate choice: portable across AI tools/drivers (no
   vendor lock-in to any one tool's native memory) and shareable across contributors with
   the same git workflow as code — one structure serving both goals.

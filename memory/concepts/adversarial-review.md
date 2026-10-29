@@ -4,7 +4,7 @@ tags: [reviewer, review, haiku, clean-slate, retry]
 summary: Adversarial review sub-agent cycle, verdict parsing, and non-blocking critique retries.
 links: [docs/arch/adr/0013-adversarial-review-marker-and-non-blocking-retry.md]
 updated: 2026-10-12
-verified: [{ by: "human", at: 2026-10-12 }]
+verified: [{ by: "human", at: 2026-10-12 }, { by: "human", at: 2026-10-29 }]
 ---
 
 # Adversarial Review
@@ -22,4 +22,4 @@ Computational sensors (linters, tests, type checks) catch deterministic bugs, bu
 
 ## Gotchas & Failure Modes
 - **Marker Line Parsing:** Marker parsing relies on exact string signals. Ambiguous output without a clear marker defaults conservatively to `CHANGES REQUESTED`.
-- **Reviewer Critique Visibility:** Critiques from exhausted review budgets are surfaced in terminal output and in floating Zellij diff-preview panes (`_show_diff_in_editor`).
+- **Reviewer Critique Visibility:** Critiques from exhausted review budgets are surfaced in terminal output and in floating Zellij diff-preview panes (`_show_diff_in_editor`). They, along with unresolved code-health findings, are also recorded in the squash commit body under `Outstanding review findings (not resolved before merge):` (one whitespace-collapsed line per item, capped at 600 chars), searchable with `git log --grep "Outstanding review findings"`.

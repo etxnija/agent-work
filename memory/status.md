@@ -1023,3 +1023,9 @@ Plan written but not approved by human.
 
 
 **Run metrics:** 13 driver call(s), $1.4643, session 30a64c0e-0859-492d-88c4-fe31b414f1c5, cache read 1635423 / write 338547 / input 114 (share 83%)
+- Added `runner/status_guard.py` (append-only enforcement for `memory/status.md`: restore earlier content, keep new lines) wired into `_run_one_task` for main and worktree copies; `_implement_tasks` now returns `guard_warnings` as a 5th element. Tests in `runner/test_status_guard.py` and `TestStatusGuardWiring`.
+- Squash commit body now lists unresolved critiques, code-health findings and guard warnings under `Outstanding review findings (not resolved before merge):` via `_outstanding_findings_section`; `_offer_merge` passes critiques/code-health through (guard warnings param exists on `_perform_squash_merge` but is not yet wired). Tests in `TestOutstandingFindingsSection`/`TestFindingsInSquashCommit`.
+- Guard warnings from `_implement_tasks` now flow through `_finalize_run` → `_offer_merge` (logged `[guard]` block) → `_perform_squash_merge` (`- Guard:` lines in the squash body). Tests in `TestGuardWarningsAtMerge`.
+
+
+**Run metrics:** 14 driver call(s), $2.0845, session 847d6d8e-62d9-4105-97e3-bca9f1d45e2f, cache read 2069918 / write 374227 / input 138 (share 85%)

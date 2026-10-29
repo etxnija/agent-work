@@ -32,6 +32,7 @@ from runner.loop import (
     _log_handlers,
     _main_checkout_dirty_paths,
     _offer_merge,
+    _outstanding_findings_section,
     _parse_task_concepts,
     _parse_tasks,
     _perform_squash_merge,
@@ -3141,7 +3142,8 @@ def _populated_metrics() -> Metrics:
 
 
 def _run_finalize(
-    repo: Path, tmp_path: Path, branch: str, answer: str, monkeypatch, cwd: Path | None = None
+    repo: Path, tmp_path: Path, branch: str, answer: str, monkeypatch, cwd: Path | None = None,
+    guard_warnings: list[str] | None = None,
 ) -> None:
     monkeypatch.chdir(cwd or repo)
     monkeypatch.delenv("ZELLIJ", raising=False)
@@ -3151,7 +3153,7 @@ def _run_finalize(
          patch("runner.loop._update_coverage_baseline"):
         _finalize_run(
             "task", repo, log_path, WorkspaceHandle(path=repo, branch=branch),
-            {}, {}, _populated_metrics(),
+            {}, {}, _populated_metrics(), guard_warnings=guard_warnings,
         )
 
 
@@ -3282,3 +3284,185 @@ class TestRunMetricsInSquashCommit:
             ", cache read 80 / write 10 / input 10 (share 80%)\n"
         )
         assert _run_metrics_entry(Metrics()).endswith("(share n/a)\n")
+
+
+# ── Append-only status.md guard wiring ────────────────────────────────────────
+
+class TestStatusGuardWiring:
+    ORIGINAL = "- old entry\n- second entry\n"
+
+    @pytest.mark.parametrize("separate_worktree", [False, True], ids=["main-checkout", "worktree-copy"])
+    def test_rewritten_status_is_restored(self, tmp_path, separate_worktree):
+        from runner.loop import STATUS_MD, _run_one_task
+
+        root = tmp_path / "root"
+        worktree = tmp_path / "wt" if separate_worktree else root
+        for base in (root, worktree):
+            (base / "memory").mkdir(parents=True, exist_ok=True)
+            (base / STATUS_MD).write_text(self.ORIGINAL)
+        status_abs = str(root / STATUS_MD)
+        handle = WorkspaceHandle(path=worktree, branch="")
+        target = worktree / STATUS_MD
+
+        def rewrite(agent_name, prompt, context_files=None, cwd=None):
+            target.write_text("- REWRITTEN\n- second entry\n- new entry\n")
+            return _ok("done")
+
+        driver = MagicMock()
+        driver.run_subagent.side_effect = rewrite
+        guard_warnings: list[str] = []
+
+        with patch("runner.loop._run_task_checks", return_value=([], [])), \
+             patch("runner.loop._commit_task"), \
+             patch("runner.loop._main_checkout_dirty_paths", return_value=[]):
+            _run_one_task(
+                driver, handle, 1, 1, "1. **t** — x", "plan.md", "AGENTS.md", status_abs,
+                root, {}, Metrics(), guard_warnings,
+            )
+
+        assert target.read_text() == self.ORIGINAL + "- REWRITTEN\n- new entry\n"
+        expected = (
+            "Task 1/1: the Worker modified existing memory/status.md content; "
+            "restored the original and kept 2 new line(s)."
+        )
+        assert guard_warnings == [expected + (" (worktree copy)" if separate_worktree else "")]
+
+
+# ── Outstanding findings in the squash commit body ───────────────────────────
+
+def _full_message(repo: Path) -> str:
+    return _git(repo, "log", "-1", "--format=%B")
+
+
+class TestOutstandingFindingsSection:
+    @pytest.mark.parametrize("critiques,health,guard,expected", [
+        (None, None, None, ""),
+        ({}, {}, [], ""),
+        ({2: "b", 1: "a"}, None, None, [
+            "- Task 1 critique: a", "- Task 2 critique: b"]),
+        ({1: "a"}, {3: ["x", "y"], 2: ["z"]}, ["g"], [
+            "- Task 1 critique: a", "- Task 2 code-health: z",
+            "- Task 3 code-health: x", "- Task 3 code-health: y", "- Guard: g"]),
+        ({1: "  multi\n\n line\t text "}, None, None, ["- Task 1 critique: multi line text"]),
+        (None, None, ["# heading\nlike"], ["- Guard: # heading like"]),
+    ])
+    def test_ordering_and_collapse(self, critiques, health, guard, expected):
+        section = _outstanding_findings_section(critiques, health, guard)
+        if expected == "":
+            assert section == ""
+        else:
+            assert section.splitlines() == [
+                "Outstanding review findings (not resolved before merge):", *expected]
+
+    @pytest.mark.parametrize("length,capped", [(599, False), (600, False), (601, True), (2000, True)])
+    def test_cap_applies_to_all_kinds(self, length, capped):
+        text = "a" * length
+        section = _outstanding_findings_section({1: text}, {1: [text]}, [text])
+        for line in section.splitlines()[1:]:
+            body = line.split(": ", 1)[1]
+            assert len(body) == min(length, 600)
+            assert body.endswith("…") == capped
+
+
+class TestFindingsInSquashCommit:
+    def test_findings_recorded_in_body(self, tmp_path):
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+        long = ("word\n" * 300)
+
+        outcome = _perform_squash_merge(
+            "agent/feat", repo, "task", ["Task 1: change"],
+            critiques={1: long}, code_health_issues={1: ["f1", "f2"]}, guard_warnings=["careful"],
+        )
+
+        assert outcome == "merged"
+        msg = _full_message(repo)
+        assert msg.count("Outstanding review findings (not resolved before merge):") == 1
+        item_lines = [l for l in msg.splitlines() if l.startswith(("- Task 1 c", "- Guard"))]
+        assert len(item_lines) == 4
+        critique_line = next(l for l in item_lines if "critique" in l)
+        text = critique_line.split(": ", 1)[1]
+        assert len(text) == 600 and text.endswith("…")
+        assert "- Task 1 code-health: f1" in msg and "- Task 1 code-health: f2" in msg
+        assert "- Guard: careful" in msg
+        found = _git(repo, "log", "--grep", "Outstanding review findings", "--format=%H").split()
+        assert found == [_git(repo, "rev-parse", "HEAD").strip()]
+
+    @pytest.mark.parametrize("kwargs", [
+        {},
+        {"critiques": None, "code_health_issues": None, "guard_warnings": None},
+        {"critiques": {}, "code_health_issues": {}, "guard_warnings": []},
+    ])
+    def test_empty_findings_leave_message_unchanged(self, tmp_path, kwargs):
+        messages = []
+        for name, kw in (("a", {}), ("b", kwargs)):
+            (tmp_path / name).mkdir()
+            repo = _metrics_repo(tmp_path / name)
+            _branch_with_change(repo, "agent/feat")
+            assert _perform_squash_merge("agent/feat", repo, "task", ["Task 1: change"], **kw) == "merged"
+            messages.append(_full_message(repo))
+        assert messages[0] == messages[1]
+        assert messages[0] == "task\n\n- Task 1: change\n\ntask\n\n"
+        assert "Outstanding review findings" not in messages[0]
+
+    def test_metrics_and_findings_share_commit(self, tmp_path):
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+        entry = _run_metrics_entry(_populated_metrics())
+
+        _perform_squash_merge(
+            "agent/feat", repo, "task", ["Task 1: change"],
+            metrics_entry=entry, critiques={1: "fix this"},
+        )
+
+        assert "**Run metrics:**" in _git(repo, "show", "HEAD", "--", "memory/status.md")
+        assert "- Task 1 critique: fix this" in _full_message(repo)
+
+    def test_offer_merge_passes_findings(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ZELLIJ", raising=False)
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+
+        with patch("builtins.input", return_value="y"):
+            outcome = _offer_merge(
+                "agent/feat", repo, "task",
+                critiques={1: "needs work"}, code_health_issues={1: ["too long"]},
+            )
+
+        assert outcome == "merged"
+        msg = _full_message(repo)
+        assert "- Task 1 critique: needs work" in msg
+        assert "- Task 1 code-health: too long" in msg
+
+
+class TestGuardWarningsAtMerge:
+    def test_merged_run_carries_guard_and_metrics_in_one_commit(self, tmp_path, monkeypatch):
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+        before = _commit_count(repo)
+
+        _run_finalize(repo, tmp_path, "agent/feat", "y", monkeypatch, guard_warnings=["Task 1/1: restored"])
+
+        assert _commit_count(repo) == before + 1
+        assert "- Guard: Task 1/1: restored" in _full_message(repo)
+        assert "**Run metrics:**" in _git(repo, "show", "HEAD", "--", "memory/status.md")
+
+    def test_declined_run_records_no_guard_section(self, tmp_path, monkeypatch):
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+
+        _run_finalize(repo, tmp_path, "agent/feat", "n", monkeypatch, guard_warnings=["Task 1/1: restored"])
+
+        assert _last_commit_subject(repo) == "Record run metrics"
+        assert _git(repo, "log", "--grep", "Outstanding review findings", "--format=%H").strip() == ""
+
+    def test_offer_merge_logs_guard_block(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.delenv("ZELLIJ", raising=False)
+        repo = _metrics_repo(tmp_path)
+        _branch_with_change(repo, "agent/feat")
+
+        with caplog.at_level("INFO"), patch("builtins.input", return_value="n"):
+            _offer_merge("agent/feat", repo, "task", guard_warnings=["Task 1/1: restored"])
+
+        assert "[guard] Outstanding memory/status.md guard warnings:" in caplog.text
+        assert "  Task 1/1: restored" in caplog.text

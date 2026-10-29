@@ -4,6 +4,7 @@ tags: [sandboxing, worktree, security, permissions]
 summary: Git worktree isolation and .claude permission rules for worker tasks.
 links: [docs/arch/adr/0007-sandboxing-deferred-to-phase-4.md, docs/arch/adr/0009-sandboxing-phase-1-1-worktree-and-tool-grants.md]
 updated: 2026-08-11
+verified: [{ by: "human", at: 2026-10-29 }]
 ---
 
 # Sandboxing & Permissions
@@ -16,8 +17,10 @@ Worker tasks must run in isolation so uncommitted edits, failed experiments, or 
 - **Planner Permission Boundary:** The Planner sub-agent runs read-only using `--allowedTools Read,Glob,Grep` (no `Bash` or `Write`), enforced at the CLI tool level.
 - **Worker Permission Boundary:** The Worker runs with `--dangerously-skip-permissions` but is constrained by `.claude/settings.json` allow/deny lists and the `PreToolUse` hook.
 - **Destructive Command Hook (`.claude/hooks/block-destructive.sh`):** Intercepts `Bash` tool calls to block high-risk commands (`rm -rf`, `git push --force`, `sudo`, `dd`) regardless of permission flags.
+- **Append-only `status.md` guard (`runner/status_guard.py`):** `_run_one_task` snapshots the main-checkout and worktree copies of `memory/status.md` before the Worker runs, and restores the original text (keeping new lines) after the Worker and again before commit; each restore is logged as `[guard]` and recorded in `guard_warnings`. No LLM or git call.
 
 ## Gotchas & Failure Modes
 - **`cwd`-Based Leakage:** `cwd`-based worktree isolation is not a hard OS process boundary. A worker can occasionally write outside its assigned worktree into the main checkout via absolute paths.
 - **Main Checkout Detection:** `_main_checkout_dirty_paths()` snapshots `git status` on the main checkout before and after each task, emitting a `[warning]` if any non-`status.md` file is mutated outside the assigned worktree.
 - **Shared `.git` Directory:** Worktrees share the primary repository's `.git` folder; status writes go to the project root via absolute path by design.
+- **Append-only guard is content-based:** `enforce_append_only` keeps only lines whose exact text is absent from the pre-run `status.md`, so an appended line duplicating an existing one (blank separators, repeated bullets or headings) is dropped when the guard has to restore the file.
